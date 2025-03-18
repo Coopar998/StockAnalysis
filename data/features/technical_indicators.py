@@ -2,17 +2,19 @@
 Stock Price Prediction System - Technical Indicators
 --------------------------------------------------
 This file handles the creation of technical indicators using TA-Lib.
+Optimized for faster processing with lightweight mode.
 """
 
 import numpy as np
 import talib
 
-def add_technical_indicators(df):
+def add_technical_indicators(df, lightweight_mode=False):
     """
     Add technical indicators to dataframe using TA-Lib
     
     Args:
         df: DataFrame with stock data (must contain OHLCV columns)
+        lightweight_mode: If True, only add essential indicators for faster processing
         
     Returns:
         None (modifies DataFrame in-place)
@@ -49,22 +51,70 @@ def add_technical_indicators(df):
         volume_arr = None
     
     if close_arr is not None:
-        add_moving_averages(df, close_arr)
-        add_macd(df, close_arr)
-        add_rsi(df, close_arr)
-        add_bollinger_bands(df, close_arr)
-        
-        if high_arr is not None and low_arr is not None:
-            add_stochastic(df, high_arr, low_arr, close_arr)
-            add_atr(df, high_arr, low_arr, close_arr)
+        if lightweight_mode:
+            # Lightweight mode: Only calculate essential indicators for faster processing
+            add_essential_indicators(df, close_arr, high_arr, low_arr, volume_arr)
+        else:
+            # Full mode: Calculate all indicators
+            add_moving_averages(df, close_arr)
+            add_macd(df, close_arr)
+            add_rsi(df, close_arr)
+            add_bollinger_bands(df, close_arr)
             
-        if volume_arr is not None:
-            # Add volume-based indicators
-            add_volume_indicators(df, close_arr, volume_arr)
-            
-        # Add advanced indicators for improved predictions
-        add_advanced_indicators(df)
+            if high_arr is not None and low_arr is not None:
+                add_stochastic(df, high_arr, low_arr, close_arr)
+                add_atr(df, high_arr, low_arr, close_arr)
+                
+            if volume_arr is not None:
+                # Add volume-based indicators
+                add_volume_indicators(df, close_arr, volume_arr)
+                
+            # Add advanced indicators for improved predictions
+            add_advanced_indicators(df)
 
+def add_essential_indicators(df, close_arr, high_arr=None, low_arr=None, volume_arr=None):
+    """Add only the most essential indicators for fast processing"""
+    try:
+        # Most important moving averages
+        df['SMA_20'] = talib.SMA(close_arr, timeperiod=20)
+        df['SMA_50'] = talib.SMA(close_arr, timeperiod=50)
+        
+        # MACD (essential)
+        macd, signal, hist = talib.MACD(close_arr, fastperiod=12, slowperiod=26, signalperiod=9)
+        df['MACD'] = macd
+        df['MACD_Signal'] = signal
+        df['MACD_Hist'] = hist
+        
+        # RSI (essential)
+        df['RSI_14'] = talib.RSI(close_arr, timeperiod=14)
+        
+        # Essential Bollinger Band metrics
+        upper, middle, lower = talib.BBANDS(close_arr, timeperiod=20, nbdevup=2, nbdevdn=2)
+        df['BB_Upper'] = upper
+        df['BB_Lower'] = lower
+        df['BB_Width'] = (upper - lower) / middle
+        
+        # Add ATR if we have the data
+        if high_arr is not None and low_arr is not None:
+            df['ATR_14'] = talib.ATR(high_arr, low_arr, close_arr, timeperiod=14)
+            df['ATR_Norm'] = df['ATR_14'] / df['Close'] * 100
+            
+        # Add OBV if we have volume data
+        if volume_arr is not None:
+            df['OBV'] = talib.OBV(close_arr, volume_arr)
+            
+        # Add basic momentum
+        df['ROC_10'] = df['Close'].pct_change(periods=10) * 100
+        
+        # Z-score for mean reversion (essential)
+        df['Close_MA20'] = df['Close'].rolling(window=20).mean()  # Already calculated as SMA_20, but keeping for clarity
+        df['Close_MA20_std'] = df['Close'].rolling(window=20).std()
+        df['Close_z_score'] = (df['Close'] - df['Close_MA20']) / df['Close_MA20_std']
+            
+        print("Added essential technical indicators")
+    except Exception as e:
+        print(f"Error adding essential indicators: {e}")
+    
 def add_moving_averages(df, close_arr):
     """Add moving averages to dataframe"""
     try:

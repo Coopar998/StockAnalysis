@@ -232,3 +232,82 @@ def get_optimal_feature_subset(X, y, feature_names, threshold=0.8, min_features=
         'importance_scores': sorted_scores[:n_features],
         'cumulative_importance': cumulative_importance[n_features-1]
     }
+
+def create_feature_importance_summary(feature_analysis_results, output_dir):
+    """
+    Create a summary of feature importance across multiple stocks
+    
+    Args:
+        feature_analysis_results: Dictionary of feature importance results by ticker
+        output_dir: Directory to save outputs
+    """
+    if not feature_analysis_results:
+        print("No feature analysis results to summarize")
+        return
+    
+    # Collect all feature names
+    all_features = set()
+    for ticker, importance in feature_analysis_results.items():
+        all_features.update(importance['combined']['sorted_names'])
+    all_features = sorted(list(all_features))
+    
+    # Create DataFrame to store importance scores for each ticker
+    summary_df = pd.DataFrame(index=all_features)
+    
+    # Add importance scores for each ticker
+    for ticker, importance in feature_analysis_results.items():
+        # Get scores for this ticker
+        scores = {}
+        for i, name in enumerate(importance['combined']['sorted_names']):
+            scores[name] = importance['combined']['sorted_scores'][i]
+        
+        # Add to DataFrame
+        summary_df[ticker] = pd.Series(scores)
+    
+    # Calculate average importance across tickers
+    summary_df['Average'] = summary_df.mean(axis=1)
+    
+    # Sort by average importance
+    summary_df = summary_df.sort_values('Average', ascending=False)
+    
+    # Save to CSV
+    os.makedirs(output_dir, exist_ok=True)
+    csv_path = os.path.join(output_dir, "feature_importance_summary.csv")
+    summary_df.to_csv(csv_path)
+    print(f"Feature importance summary saved to {csv_path}")
+    
+    # Plot top features by average importance
+    plt.figure(figsize=(12, 10))
+    top_n = min(20, len(summary_df))
+    plt.barh(range(top_n), summary_df['Average'].values[:top_n], align='center')
+    plt.yticks(range(top_n), summary_df.index[:top_n])
+    plt.xlabel('Average Importance')
+    plt.title(f'Top {top_n} Features by Average Importance Across All Stocks')
+    plt.tight_layout()
+    
+    plt.savefig(os.path.join(output_dir, "feature_importance_summary.png"))
+    plt.close()
+    
+    # Create heatmap of top features across tickers
+    plt.figure(figsize=(14, 12))
+    top_features = summary_df.index[:top_n]
+    tickers = [col for col in summary_df.columns if col != 'Average']
+    
+    # Create heatmap data
+    heatmap_data = summary_df.loc[top_features, tickers]
+    
+    # Use seaborn if available, otherwise use matplotlib
+    try:
+        import seaborn as sns
+        sns.heatmap(heatmap_data, annot=False, cmap='viridis', linewidths=.5)
+    except ImportError:
+        plt.imshow(heatmap_data, cmap='viridis', aspect='auto')
+        plt.colorbar(label='Importance Score')
+        plt.xticks(range(len(tickers)), tickers, rotation=45)
+        plt.yticks(range(len(top_features)), top_features)
+    
+    plt.title('Feature Importance Heatmap Across Stocks')
+    plt.tight_layout()
+    
+    plt.savefig(os.path.join(output_dir, "feature_importance_heatmap.png"))
+    plt.close()
