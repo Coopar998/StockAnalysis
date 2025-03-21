@@ -309,7 +309,8 @@ def download_from_yfinance(ticker, start_date, end_date, cache=True, update_db=T
     
     for attempt in range(max_retries):
         try:
-            df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+            # Set auto_adjust explicitly to False to maintain backward compatibility
+            df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
             
             if df.empty:
                 logger.warning(f"No data available for {ticker}")
@@ -440,8 +441,8 @@ def download_multiple_stock_data(tickers, start_date, end_date, cache=True, forc
         logger.info(f"Downloading batch {i//batch_size + 1}/{(len(remaining_tickers) + batch_size - 1)//batch_size} with {len(batch)} tickers...")
         
         try:
-            # Download batch
-            data = yf.download(batch, start=start_date, end=end_date, group_by='ticker', progress=False)
+            # Download batch with auto_adjust=False
+            data = yf.download(batch, start=start_date, end=end_date, group_by='ticker', progress=False, auto_adjust=False)
             
             # Check if we got a single ticker result (not grouped)
             if len(batch) == 1 and not isinstance(data.columns, pd.MultiIndex):

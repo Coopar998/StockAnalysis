@@ -611,7 +611,7 @@ def is_good_for_active_trading(ticker, trend_metrics, volatility_metrics, predic
     # Start with base score
     score = 0.0
     
-    # IMPROVED: More stringent criteria for active trading
+    # MODIFIED: Less stringent criteria for active trading
     
     # Check sector-specific factors (tech and energy are often better for active trading)
     tech_tickers = ["AAPL", "MSFT", "GOOGL", "META", "NVDA", "INTC", "AMD", "ADBE", "CRM"]
@@ -619,81 +619,61 @@ def is_good_for_active_trading(ticker, trend_metrics, volatility_metrics, predic
     finance_tickers = ["JPM", "BAC", "GS", "MS", "V", "MA", "AXP"]
     
     if ticker in tech_tickers:
-        score += 0.1
+        score += 0.15  # Increased from 0.1
     elif ticker in energy_tickers:
-        score += 0.05
+        score += 0.1   # Increased from 0.05
     elif ticker in finance_tickers:
-        score -= 0.05  # Financial stocks often move more gradually
+        score += 0.05  # Changed from negative to positive
     
-    # Add points for good prediction accuracy (critical factor)
-    if prediction_accuracy > 0.62:
+    # Add points for prediction accuracy (critical factor) - MODIFIED thresholds
+    if prediction_accuracy > 0.59:
         score += 0.5
-    elif prediction_accuracy > 0.58:
-        score += 0.4
     elif prediction_accuracy > 0.55:
+        score += 0.4
+    elif prediction_accuracy > 0.52:  # Lowered threshold
         score += 0.3
-    elif prediction_accuracy > 0.53:
-        score += 0.2
     elif prediction_accuracy > 0.5:
-        score += 0.1
-    else:
-        score -= 0.2  # Penalize poor prediction accuracy
-    
-    # Add points for good trend quality
-    if trend_metrics['trend_quality'] > 0.75:
-        score += 0.25
-    elif trend_metrics['trend_quality'] > 0.65:
         score += 0.2
-    elif trend_metrics['trend_quality'] > 0.55:
-        score += 0.15
-    elif trend_metrics['trend_quality'] > 0.45:
-        score += 0.1
     else:
-        score -= 0.1  # Penalize choppy, low-quality trends
+        score -= 0.1  # Reduced penalty
     
-    # Add points for appropriate volatility
-    vol_regime = volatility_metrics['volatility_regime']
-    if vol_regime == 'medium':
-        score += 0.2  # Medium volatility is ideal
-    elif vol_regime == 'high':
+    # Add points for good trend quality - MODIFIED thresholds
+    if trend_metrics['trend_quality'] > 0.7:
+        score += 0.25
+    elif trend_metrics['trend_quality'] > 0.6:
+        score += 0.2
+    elif trend_metrics['trend_quality'] > 0.5:
         score += 0.15
+    elif trend_metrics['trend_quality'] > 0.4:  # Lowered threshold
+        score += 0.1
+    
+    # Add points for appropriate volatility - MODIFIED to favor more volatility
+    vol_regime = volatility_metrics['volatility_regime']
+    if vol_regime == 'high':
+        score += 0.2  # Increased from 0.15 (favor more volatile stocks)
+    elif vol_regime == 'medium':
+        score += 0.15  # Decreased from 0.2
     elif vol_regime == 'low':
         score += 0.05
     elif vol_regime == 'very_high':
-        score -= 0.1  # Too volatile is risky
+        score += 0.05  # Changed from negative to slightly positive
     elif vol_regime == 'very_low':
-        score -= 0.15  # Too little volatility gives few opportunities
+        score -= 0.1   # Reduced penalty
     
     # Add points for decreasing volatility (more stable conditions)
     if volatility_metrics['volatility_trend'] == 'decreasing':
         score += 0.1
     
-    # Is it good for active trading? Higher threshold than before
-    is_good = score >= 0.6  # Increased from 0.5
+    # Is it good for active trading? Lower threshold than before
+    is_good = score >= 0.45  # Reduced from 0.6
     
     return is_good, score
 
 def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, mae, rmse, mape, 
                       output_dir=None, portfolio=None, fast_analysis=True, verbose=False, data=None):
     """
-    Analyze model performance and implement a balanced trading strategy that
-    attempts to outperform buy & hold with reasonable frequency of trades.
-    
-    Args:
-        ticker: Stock ticker symbol
-        y_test: Actual prices
-        y_pred_corrected: Predicted prices
-        test_dates: Dates for testing period
-        history: Training history
-        mae, rmse, mape: Error metrics
-        output_dir: Directory to save outputs
-        portfolio: Portfolio dictionary for tracking performance
-        fast_analysis: Use faster analysis with fewer calculations
-        verbose: Whether to print detailed output
-        data: Complete dataframe with all features (if available)
-        
-    Returns:
-        Dictionary with performance metrics and trading results
+    Analyze model performance and implement a balanced trading strategy.
+    Modified to generate more signals and improve returns.
     """
     logger = logging.getLogger('stock_prediction')
     
@@ -772,15 +752,14 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
     # Calculate percentage changes - this is our main signal
     predicted_change_pcts = (y_diff / y_test[:-1]) * 100
     
-    # IMPROVED: Use higher thresholds and require confirmation from technical indicators
-    buy_threshold = 1.0  # Increased from 0.8%
-    sell_threshold = -1.0
+    # MODIFIED: Lower thresholds to generate more signals
+    buy_threshold = 0.7  # Decreased from 1.0%
+    sell_threshold = -0.7  # Decreased from -1.0%
     
     # Pre-allocate signal arrays
     buy_signals = np.zeros(len(y_diff), dtype=bool)
     sell_signals = np.zeros(len(y_diff), dtype=bool)
     
-    # IMPROVED: More selective signal generation with multi-factor confirmation
     # Get technical signals for confirmation
     tech_buy_signals = tech_signals['signals'].get('buy', np.zeros(len(y_test), dtype=bool))
     tech_sell_signals = tech_signals['signals'].get('sell', np.zeros(len(y_test), dtype=bool))
@@ -797,39 +776,35 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
     trend_direction = np.sign(trend_medium[1:] - trend_medium[:-1])
     long_trend = np.sign(trend_long[-1] - trend_long[-ma_short])
     
-    # IMPROVED: Combine prediction signals with technical confirmation
-    # Buy signal: Predicted price increase above threshold AND (tech signal OR strong trend)
-    buy_signals = pred_buy_signals & (tech_buy_aligned | (trend_direction > 0))
+    # MODIFIED: Relax confirmation requirements for signal generation
+    # Buy signal: Predicted price increase above threshold OR tech signal with positive trend
+    buy_signals = pred_buy_signals | (tech_buy_aligned & (trend_direction > 0))
     
-    # Sell signal: Predicted price decrease below threshold AND (tech signal OR negative trend)
-    sell_signals = pred_sell_signals & (tech_sell_aligned | (trend_direction < 0))
+    # Sell signal: Predicted price decrease below threshold OR tech signal with negative trend
+    sell_signals = pred_sell_signals | (tech_sell_aligned & (trend_direction < 0))
     
-    # IMPROVED: Filter signals based on market conditions and trend quality
-    # Only buy in uptrends with high prediction confidence
-    if trend_metrics['trend_direction'] > 0 and trend_metrics['trend_quality'] > 0.6:
-        # Keep buy signals in strong uptrends
-        buy_signals = buy_signals
-    else:
-        # More conservative in weak or down trends - require stronger signals
-        buy_signals = buy_signals & (predicted_change_pcts > buy_threshold * 1.5)
+    # MODIFIED: Less restrictive filtering
+    # Only in very weak trends require stronger signals
+    if trend_metrics['trend_quality'] < 0.4 and trend_metrics['trend_direction'] < 0:
+        # More conservative in very weak downtrends
+        buy_signals = buy_signals & (predicted_change_pcts > buy_threshold * 1.2)
     
-    # Be more aggressive with selling in downtrends
+    # Be more aggressive with selling in strong downtrends
     if trend_metrics['trend_direction'] < 0 and trend_metrics['trend_quality'] > 0.6:
         # More aggressive selling in clear downtrends
-        sell_signals = sell_signals | (predicted_change_pcts < sell_threshold * 0.7)
+        sell_signals = sell_signals | (predicted_change_pcts < sell_threshold * 0.6)
     
     if verbose:
         logger.info(f"Signals for {ticker}:")
         logger.info(f"  Buy signals: {np.sum(buy_signals)} out of {len(y_diff)} potential signals")
         logger.info(f"  Sell signals: {np.sum(sell_signals)} out of {len(y_diff)} potential signals")
     
-    # IMPROVED: Strategy selection based on comprehensive stock characteristics
-    # Favor buy & hold more strongly for stocks with poor active trading characteristics
-    # or exceptional buy & hold returns
-    use_buy_hold = (buy_hold_return_pct > 35 and recent_accuracy < 0.54) or \
-                  (buy_hold_return_pct > 50 and recent_accuracy < 0.58) or \
-                  (not is_suitable and buy_hold_return_pct > 25) or \
-                  (trend_metrics['trend_quality'] > 0.8 and trend_metrics['trend_direction'] > 0 and buy_hold_return_pct > 30)
+    # MODIFIED: Strategy selection based on comprehensive stock characteristics
+    # More stocks should use active trading
+    use_buy_hold = (buy_hold_return_pct > 45 and recent_accuracy < 0.52) or \
+                  (buy_hold_return_pct > 60 and recent_accuracy < 0.55) or \
+                  (not is_suitable and buy_hold_return_pct > 35) or \
+                  (trend_metrics['trend_quality'] > 0.85 and trend_metrics['trend_direction'] > 0 and buy_hold_return_pct > 40)
     
     # Default to active trading for suitable stocks
     use_active_trading = not use_buy_hold
@@ -851,7 +826,7 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
         if verbose:
             logger.info(f"Using active trading for {ticker} with {recent_accuracy:.2f} accuracy")
         
-        # IMPROVED: Implement an even more sophisticated trading strategy
+        # Implement trading strategy
         initial_capital = 10000
         capital = initial_capital
         position = 0
@@ -869,30 +844,30 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
         current_lose_streak = 0
         entry_price = None
         
-        # IMPROVED: Dynamic position sizing based on confidence and winning streaks
+        # MODIFIED: Dynamic position sizing based on confidence and winning streaks
         base_position_pct = 1.0  # Base position size (100%)
-        max_position_pct = 1.5   # Maximum position size (150%)
-        min_position_pct = 0.5   # Minimum position size (50%)
+        max_position_pct = 1.8   # Maximum position size (increased from 1.5)
+        min_position_pct = 0.6   # Minimum position size (increased from 0.5)
         
-        # IMPROVED: Adaptive risk management parameters
-        # Tighter stops for more volatile stocks
+        # MODIFIED: Adaptive risk management parameters - less conservative
+        # Adjust stop loss for volatility
         vol_factor = 1.0
         if volatility_metrics['volatility_regime'] == 'high':
-            vol_factor = 0.8  # Tighter stops for high volatility
+            vol_factor = 0.85  # Less tight stops for high volatility
         elif volatility_metrics['volatility_regime'] == 'low':
-            vol_factor = 1.2  # Wider stops for low volatility
+            vol_factor = 1.3  # Wider stops for low volatility
         
-        # Base risk management parameters
-        stop_loss_pct = 2.5 * vol_factor      # Stop loss percentage
-        trailing_stop_pct = 3.5 * vol_factor  # Trailing stop percentage
-        take_profit_pct = 5.0                # Take profit percentage
+        # Base risk management parameters - MODIFIED for less conservative approach
+        stop_loss_pct = 3.0 * vol_factor      # Increased from 2.5%
+        trailing_stop_pct = 4.0 * vol_factor  # Increased from 3.5%
+        take_profit_pct = 6.0                 # Increased from 5.0%
         
         # Track highest price since entry for trailing stop
         highest_since_entry = None
         
-        # IMPROVED: Hold periods based on regime
+        # MODIFIED: Hold periods based on regime
         min_holding_period = 1
-        max_holding_period = 15  # Reduced from 20 for more active management
+        max_holding_period = 12  # Reduced from 15 for more active management
         last_trade_day = None
         days_in_position = 0
         
@@ -928,14 +903,14 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
                 if entry_price is not None:
                     price_change_pct = ((current_price / entry_price) - 1) * 100
                     
-                    # IMPROVED: Adaptive stops based on recent performance
+                    # MODIFIED: Adaptive stops based on recent performance
                     current_stop_loss = stop_loss_pct
                     if len(recent_trades) >= 3:
                         # Count recent losses
                         recent_losses = sum(1 for trade in recent_trades if trade < 0)
                         if recent_losses >= 2:
-                            # Tighten stops after multiple losses
-                            current_stop_loss = stop_loss_pct * 0.8
+                            # Tighten stops after multiple losses (but less aggressively)
+                            current_stop_loss = stop_loss_pct * 0.85  # Changed from 0.8
                     
                     # Fixed stop loss
                     if price_change_pct < -current_stop_loss:
@@ -962,16 +937,16 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
                         last_trade_day = current_date
                         continue
                     
-                    # IMPROVED: Adaptive trailing stop
+                    # MODIFIED: Adaptive trailing stop
                     current_trailing_stop = trailing_stop_pct
-                    if price_change_pct > 3.0:
+                    if price_change_pct > 4.0:  # Increased from 3.0
                         # Tighten trailing stop when in good profit
-                        current_trailing_stop = trailing_stop_pct * 0.7
+                        current_trailing_stop = trailing_stop_pct * 0.75  # Modified from 0.7
                     
                     # Trailing stop
                     if highest_since_entry is not None:
                         drawdown_pct = ((current_price / highest_since_entry) - 1) * 100
-                        if price_change_pct > 2.0 and drawdown_pct < -current_trailing_stop:
+                        if price_change_pct > 2.5 and drawdown_pct < -current_trailing_stop:  # Modified from 2.0
                             if verbose:
                                 logger.info(f"Trailing stop triggered at {current_price:.2f} (high: {highest_since_entry:.2f})")
                             capital = position * current_price
@@ -1002,11 +977,11 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
                             last_trade_day = current_date
                             continue
                     
-                    # IMPROVED: Adaptive take profit based on trend strength
+                    # MODIFIED: Adaptive take profit based on trend strength
                     current_take_profit = take_profit_pct
-                    if trend_metrics['trend_quality'] > 0.7 and trend_metrics['trend_direction'] > 0:
+                    if trend_metrics['trend_quality'] > 0.65 and trend_metrics['trend_direction'] > 0:
                         # Higher targets in strong uptrends
-                        current_take_profit = take_profit_pct * 1.3
+                        current_take_profit = take_profit_pct * 1.4  # Increased from 1.3
                     
                     # Take profit
                     if price_change_pct > current_take_profit:
@@ -1033,15 +1008,15 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
                         last_trade_day = current_date
                         continue
                     
-                    # IMPROVED: Adaptive time-based exit
+                    # MODIFIED: Adaptive time-based exit
                     # Exit sooner in deteriorating conditions
                     current_max_holding = max_holding_period
-                    if i < len(rsi_values) and rsi_values[i] > 70:
+                    if i < len(rsi_values) and rsi_values[i] > 75:  # Increased from 70
                         # Exit sooner in overbought conditions
-                        current_max_holding = int(max_holding_period * 0.7)
+                        current_max_holding = int(max_holding_period * 0.65)  # Changed from 0.7
                     
-                    # Time-based exit (max holding period)
-                    if days_in_position >= current_max_holding and price_change_pct < 2.0:
+                    # Time-based exit (max holding period) - MODIFIED to be more flexible
+                    if days_in_position >= current_max_holding and price_change_pct < 3.0:  # Increased from 2.0
                         if verbose:
                             logger.info(f"Time-based exit triggered after {days_in_position} days at {current_price:.2f}")
                         capital = position * current_price
@@ -1088,19 +1063,19 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
                     if days_since_last_trade < min_holding_period:
                         continue
                 
-                # IMPROVED: Buy signal with ML-enhanced entry conditions and position sizing
+                # MODIFIED: Buy signal with enhanced entry conditions and position sizing
                 if action == 'buy' and position == 0 and capital > 0:
-                    # IMPROVED: Check additional entry conditions
+                    # MODIFIED: Check additional entry conditions - less restrictive
                     proceed_with_buy = True
                     
                     # Check RSI for extreme conditions
-                    if i < len(rsi_values) and rsi_values[i] > 75:
+                    if i < len(rsi_values) and rsi_values[i] > 80:  # Increased from 75
                         proceed_with_buy = False  # Don't buy in extreme overbought conditions
                     
-                    # Check recent performance
-                    if current_lose_streak >= 3:
-                        # After 3 consecutive losses, be more selective
-                        if trend_metrics['trend_quality'] < 0.6 or recent_accuracy < 0.55:
+                    # Check recent performance - MODIFIED to be less restrictive
+                    if current_lose_streak >= 4:  # Increased from 3
+                        # After 4 consecutive losses, be more selective
+                        if trend_metrics['trend_quality'] < 0.5 or recent_accuracy < 0.52:  # Relaxed from 0.6/0.55
                             proceed_with_buy = False
                     
                     if proceed_with_buy:
@@ -1111,23 +1086,23 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
                         if len(recent_trades) > 0:
                             recent_win_rate = sum(1 for trade in recent_trades if trade > 0) / len(recent_trades)
                             if recent_win_rate > 0.6:
-                                position_modifier *= 1.2
+                                position_modifier *= 1.25  # Increased from 1.2
                             elif recent_win_rate < 0.4:
-                                position_modifier *= 0.8
+                                position_modifier *= 0.85  # Increased from 0.8
                         
                         # Adjust for trend strength
-                        if trend_metrics['trend_quality'] > 0.7:
-                            position_modifier *= 1.1
+                        if trend_metrics['trend_quality'] > 0.65:  # Reduced from 0.7
+                            position_modifier *= 1.15  # Increased from 1.1
                         
                         # Adjust for win/loss streak
                         if current_win_streak >= 2:
-                            position_modifier *= 1.1
+                            position_modifier *= 1.15  # Increased from 1.1
                         elif current_lose_streak >= 2:
-                            position_modifier *= 0.7
+                            position_modifier *= 0.75  # Increased from 0.7
                         
                         # Adjust for prediction accuracy
-                        if recent_accuracy > 0.55:
-                            position_modifier *= 1.1
+                        if recent_accuracy > 0.54:  # Reduced from 0.55
+                            position_modifier *= 1.15  # Increased from 1.1
                         
                         # Cap position size
                         final_position_pct = min(max(min_position_pct, position_modifier), max_position_pct)

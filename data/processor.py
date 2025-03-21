@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import logging
 from data.fetcher import download_stock_data
+from datetime import datetime
 from data.features.basic_features import add_basic_features
 from data.features.technical_indicators import add_technical_indicators
 from utils.database import StockDatabase
