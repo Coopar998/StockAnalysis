@@ -123,11 +123,43 @@ class StockDatabase:
                 
                 # Ensure date column is formatted correctly for SQL
                 if isinstance(df_copy.index, pd.DatetimeIndex):
+                    # Use reset_index with proper handling for DatetimeIndex
                     df_copy = df_copy.reset_index()
-                    df_copy['date'] = df_copy['index'].astype(str)
-                    df_copy = df_copy.drop('index', axis=1)
-                elif 'date' not in df_copy.columns and 'Date' in df_copy.columns:
-                    df_copy = df_copy.rename(columns={'Date': 'date'})
+                    if 'index' in df_copy.columns:
+                        df_copy['date'] = df_copy['index'].astype(str)
+                        df_copy = df_copy.drop('index', axis=1)
+                    elif 'Date' in df_copy.columns:
+                        df_copy['date'] = df_copy['Date'].astype(str)
+                        # Only drop if it's not needed for other operations
+                        if 'date' != 'Date':  # Avoid dropping if renamed to same column
+                            df_copy = df_copy.drop('Date', axis=1)
+                    else:
+                        # If reset_index didn't create 'index' or 'Date' column,
+                        # the DatetimeIndex was probably already reset or renamed
+                        # Try to find a date-like column
+                        date_cols = [col for col in df_copy.columns if 'date' in col.lower() or 'time' in col.lower()]
+                        if date_cols:
+                            df_copy['date'] = df_copy[date_cols[0]].astype(str)
+                            if date_cols[0] != 'date':  # Avoid dropping if already named 'date'
+                                df_copy = df_copy.drop(date_cols[0], axis=1)
+                        else:
+                            # Last resort: create a date column with current row indices
+                            self.logger.warning(f"Could not find date column for {ticker}, creating artificial dates")
+                            df_copy['date'] = pd.date_range(start='2000-01-01', periods=len(df_copy)).astype(str)
+                elif 'date' not in df_copy.columns:
+                    if 'Date' in df_copy.columns:
+                        df_copy = df_copy.rename(columns={'Date': 'date'})
+                    else:
+                        # Try to find or create a date column
+                        date_cols = [col for col in df_copy.columns if 'date' in col.lower() or 'time' in col.lower()]
+                        if date_cols:
+                            df_copy['date'] = df_copy[date_cols[0]].astype(str)
+                            if date_cols[0] != 'date':  # Avoid dropping if already named 'date'
+                                df_copy = df_copy.drop(date_cols[0], axis=1)
+                        else:
+                            # Last resort: create a date column with current row indices
+                            self.logger.warning(f"Could not find date column for {ticker}, creating artificial dates")
+                            df_copy['date'] = pd.date_range(start='2000-01-01', periods=len(df_copy)).astype(str)
                 
                 # Extract OHLCV columns
                 price_columns = ['date']
@@ -163,10 +195,29 @@ class StockDatabase:
                 price_columns.append('ticker')
                 
                 # Only keep necessary columns
-                price_df = df_copy[price_columns]
+                try:
+                    price_df = df_copy[price_columns]
+                except KeyError as e:
+                    self.logger.error(f"Missing columns for {ticker}: {e}")
+                    self.logger.info(f"Available columns: {df_copy.columns.tolist()}")
+                    # Try a more flexible approach - use whatever columns are available
+                    available_cols = ['date', 'ticker']
+                    for col in price_columns:
+                        if col in df_copy.columns:
+                            available_cols.append(col)
+                    price_df = df_copy[available_cols]
+                
+                # Make sure we have enough data to insert
+                if price_df.empty or 'date' not in price_df.columns or 'ticker' not in price_df.columns:
+                    self.logger.error(f"Insufficient data for {ticker}, skipping database insertion")
+                    return False
+                
+                # Delete existing entries for this ticker before inserting new ones
+                cursor = conn.cursor()
+                cursor.execute(f"DELETE FROM price_data WHERE ticker = ?", (ticker,))
                 
                 # Store price data
-                price_df.to_sql('price_data', conn, if_exists='replace', index=False)
+                price_df.to_sql('price_data', conn, if_exists='append', index=False)
                 
                 # Update metadata
                 data_start_date = price_df['date'].min()
@@ -189,7 +240,6 @@ class StockDatabase:
                 }
                 
                 # Insert or update metadata
-                cursor = conn.cursor()
                 cursor.execute('''
                 INSERT OR REPLACE INTO stock_metadata 
                 (ticker, company_name, sector, industry, market_cap, last_updated, 

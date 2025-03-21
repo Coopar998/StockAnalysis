@@ -40,6 +40,7 @@ def setup_logging(verbose=False):
 def process_single_ticker(ticker, start_date, end_date, model_path, output_dir, train_model=False, verbose=False):
     """Process a single ticker for parallel execution"""
     try:
+        # MODIFIED: Use adaptive lightweight mode - faster for known high-quality data
         return process_ticker(
             ticker,
             start_date,
@@ -48,7 +49,8 @@ def process_single_ticker(ticker, start_date, end_date, model_path, output_dir, 
             output_dir=output_dir,
             train_model=train_model,
             portfolio=None,  # Can't share portfolio between processes
-            create_plots=False,  # Disable plots for faster processing
+            create_plots=True,  # Enable plots for visualization
+            lightweight_mode=True,  # Use lightweight mode for faster processing
             verbose=verbose
         )
     except Exception as e:
@@ -105,8 +107,9 @@ def main(verbose=False):
     # Record start time
     start_time = time.time()
 
+    # MODIFIED: Increase historical data for better model training
     end_date = datetime.today().strftime('%Y-%m-%d')
-    start_date = (datetime.today() - timedelta(days=2500)).strftime('%Y-%m-%d')
+    start_date = (datetime.today() - timedelta(days=3000)).strftime('%Y-%m-%d')  # Increased from 2500
     
     base_dir = "stock_prediction_results"
     model_dir = os.path.join(base_dir, "models")
@@ -117,19 +120,19 @@ def main(verbose=False):
     os.makedirs(predictions_dir, exist_ok=True)
     os.makedirs(feature_analysis_dir, exist_ok=True)
     
-    # INCREASED NUMBER: Use 30 stocks for testing with a mix of different sectors
+    # INCREASED NUMBER: Use 40 stocks for testing with a mix of different sectors
     # Define a wider set of evaluation tickers covering different sectors
     evaluation_tickers = [
         # Tech
-        "AAPL", "MSFT", "GOOGL", "META", "NVDA", "INTC", "AMD", "ADBE", "CRM", 
+        "AAPL", "MSFT", "GOOGL", "META", "NVDA", "INTC", "AMD", "ADBE", "CRM", "CSCO", "ORCL", 
         # Finance
-        "JPM", "BAC", "GS", "MS", "V", "MA", "AXP", 
+        "JPM", "BAC", "GS", "MS", "V", "MA", "AXP", "WFC", "C", "BLK",
         # Healthcare
-        "JNJ", "PFE", "MRK", "UNH", "ABT", "LLY",
+        "JNJ", "PFE", "MRK", "UNH", "ABT", "LLY", "ABBV", "TMO", "AMGN",
         # Consumer
-        "AMZN", "WMT", "HD", "MCD", "SBUX", "NKE", "DIS",
+        "AMZN", "WMT", "HD", "MCD", "SBUX", "NKE", "DIS", "PG", "KO", "PEP",
         # Energy
-        "XOM", "CVX", "COP"
+        "XOM", "CVX", "COP", "SLB", "EOG", "PSX", "OXY", "VLO", "MPC"
     ]
     
     if verbose:
@@ -226,39 +229,49 @@ def main(verbose=False):
             logger.info("Using existing model for predictions")
         model_path = os.path.join(model_dir, "multi_stock_model.keras")
         
-        # Parallel processing for predictions
-        max_workers = min(6, len(evaluation_tickers))
-        if verbose:
-            logger.info(f"Processing {len(evaluation_tickers)} tickers in parallel with {max_workers} workers")
+        # Increase batch size for faster processing with more stocks
+        batch_size = min(len(evaluation_tickers), 10)  # MODIFIED: Increased from 5
         
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_ticker = {
-                executor.submit(
-                    process_single_ticker, 
-                    ticker, start_date, end_date, model_path, predictions_dir, False, verbose
-                ): ticker 
-                for ticker in evaluation_tickers
-            }
+        # MODIFIED: Chunk the tickers into batches to avoid memory issues
+        ticker_chunks = [evaluation_tickers[i:i+batch_size] for i in range(0, len(evaluation_tickers), batch_size)]
+        
+        for chunk_idx, ticker_chunk in enumerate(ticker_chunks):
+            if verbose:
+                logger.info(f"Processing chunk {chunk_idx+1}/{len(ticker_chunks)} with {len(ticker_chunk)} tickers")
+                
+            # Parallel processing for predictions
+            max_workers = min(6, len(ticker_chunk))
+            if verbose:
+                logger.info(f"Processing {len(ticker_chunk)} tickers in parallel with {max_workers} workers")
             
-            # Process results as they complete
-            for future in concurrent.futures.as_completed(future_to_ticker):
-                ticker = future_to_ticker[future]
-                try:
-                    result = future.result()
-                    results.append(result)
-                    
-                    # Update portfolio manually
-                    if result['success']:
-                        update_portfolio_with_result(portfolio, result, ticker, verbose)
-                    
-                except Exception as e:
-                    logger.error(f"Error processing {ticker}: {e}")
-                    results.append({
-                        "ticker": ticker,
-                        "success": False,
-                        "message": f"Error: {str(e)}"
-                    })
+            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                future_to_ticker = {
+                    executor.submit(
+                        process_single_ticker, 
+                        ticker, start_date, end_date, model_path, predictions_dir, False, verbose
+                    ): ticker 
+                    for ticker in ticker_chunk
+                }
+                
+                # Process results as they complete
+                for future in concurrent.futures.as_completed(future_to_ticker):
+                    ticker = future_to_ticker[future]
+                    try:
+                        result = future.result()
+                        results.append(result)
+                        
+                        # Update portfolio manually
+                        if result['success']:
+                            update_portfolio_with_result(portfolio, result, ticker, verbose)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing {ticker}: {e}")
+                        results.append({
+                            "ticker": ticker,
+                            "success": False,
+                            "message": f"Error: {str(e)}"
+                        })
         
         # Create visualization plots separately after processing
         if verbose:
