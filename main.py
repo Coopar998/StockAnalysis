@@ -15,6 +15,7 @@ import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import concurrent.futures
+import logging
 
 from data.fetcher import get_sp500_tickers, get_top_market_cap_stocks, download_multiple_stock_data
 from data.processor import prepare_data, create_sequences
@@ -23,8 +24,20 @@ from trading.strategy import process_ticker
 from trading.performance import calculate_portfolio_performance, create_strategy_comparison
 from utils.feature_analysis import analyze_feature_importance, create_feature_importance_summary
 
+# Configure logging
+def setup_logging(verbose=False):
+    """Setup logging configuration"""
+    level = logging.INFO if verbose else logging.WARNING
+    format_str = '%(asctime)s - %(levelname)s - %(message)s' if verbose else '%(message)s'
+    logging.basicConfig(level=level, format=format_str)
+    # Create logger
+    logger = logging.getLogger('stock_prediction')
+    logger.setLevel(level)
+    # Return configured logger
+    return logger
+
 # Function to process a single ticker (for parallel processing)
-def process_single_ticker(ticker, start_date, end_date, model_path, output_dir, train_model=False):
+def process_single_ticker(ticker, start_date, end_date, model_path, output_dir, train_model=False, verbose=False):
     """Process a single ticker for parallel execution"""
     try:
         return process_ticker(
@@ -35,16 +48,18 @@ def process_single_ticker(ticker, start_date, end_date, model_path, output_dir, 
             output_dir=output_dir,
             train_model=train_model,
             portfolio=None,  # Can't share portfolio between processes
-            create_plots=False  # Disable plots for faster processing
+            create_plots=False,  # Disable plots for faster processing
+            verbose=verbose
         )
     except Exception as e:
         import traceback
-        print(f"Error processing {ticker}: {e}")
-        print(traceback.format_exc())
+        if verbose:
+            print(f"Error processing {ticker}: {e}")
+            print(traceback.format_exc())
         return {"ticker": ticker, "success": False, "message": str(e)}
 
 # Function to update portfolio with results from parallel processing
-def update_portfolio_with_result(portfolio, result, ticker):
+def update_portfolio_with_result(portfolio, result, ticker, verbose=False):
     """Update portfolio with results from a processed ticker"""
     if not result['success']:
         return
@@ -56,6 +71,8 @@ def update_portfolio_with_result(portfolio, result, ticker):
     trades = result.get('total_trades', 0)
     strategy = result.get('strategy', 'buy_hold')
     recent_accuracy = result.get('prediction_accuracy', 0)
+    winning_trades = result.get('winning_trades', 0)
+    losing_trades = result.get('losing_trades', 0)
     
     # Calculate final value
     final_value = initial_capital * (1 + total_return/100)
@@ -68,11 +85,23 @@ def update_portfolio_with_result(portfolio, result, ticker):
         'buy_hold_return_pct': buy_hold_return,
         'prediction_accuracy': recent_accuracy,
         'total_trades': trades,
+        'winning_trades': winning_trades,
+        'losing_trades': losing_trades,
         'strategy': strategy
     }
+    
+    # Extract trades if available in the result
+    if 'trades' in result:
+        portfolio['returns'][ticker]['trades'] = result['trades']
+    
+    if verbose:
+        print(f"Added {ticker} performance to portfolio: {total_return:.2f}% return with {trades} trades")
 
-def main():
+def main(verbose=False):
     """Main function to run the stock prediction system"""
+    # Setup logging based on verbosity
+    logger = setup_logging(verbose)
+    
     # Record start time
     start_time = time.time()
 
@@ -103,7 +132,8 @@ def main():
         "XOM", "CVX", "COP"
     ]
     
-    print(f"Evaluating on {len(evaluation_tickers)} stocks from multiple sectors")
+    if verbose:
+        logger.info(f"Evaluating on {len(evaluation_tickers)} stocks from multiple sectors")
     
     pd.DataFrame(evaluation_tickers, columns=['ticker']).to_csv(
         os.path.join(base_dir, "evaluation_tickers.csv"), index=False)
@@ -126,16 +156,19 @@ def main():
     results = []
     
     # Pre-download data for all tickers to improve performance
-    print("Pre-downloading data for all evaluation tickers...")
+    if verbose:
+        logger.info("Pre-downloading data for all evaluation tickers...")
     try:
         ticker_data_map = download_multiple_stock_data(evaluation_tickers, start_date, end_date)
-        print(f"Successfully pre-downloaded data for {len(ticker_data_map)} tickers")
+        if verbose:
+            logger.info(f"Successfully pre-downloaded data for {len(ticker_data_map)} tickers")
     except Exception as e:
-        print(f"Error pre-downloading data: {e}")
+        logger.error(f"Error pre-downloading data: {e}")
         ticker_data_map = {}
     
     if mode == 1:
-        print("Training individual models for each ticker")
+        if verbose:
+            logger.info("Training individual models for each ticker")
         # Parallel processing for individual models
         with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
             futures = []
@@ -146,7 +179,7 @@ def main():
                     executor.submit(
                         process_single_ticker, 
                         ticker, start_date, end_date, 
-                        ticker_model_path, predictions_dir, True
+                        ticker_model_path, predictions_dir, True, verbose
                     )
                 )
             
@@ -157,18 +190,20 @@ def main():
                     results.append(result)
                     # Update portfolio
                     if result['success']:
-                        update_portfolio_with_result(portfolio, result, result['ticker'])
+                        update_portfolio_with_result(portfolio, result, result['ticker'], verbose)
                 except Exception as e:
-                    print(f"Error in processing: {e}")
+                    logger.error(f"Error in processing: {e}")
             
     elif mode == 2:
-        print("Training one model on all tickers")
+        if verbose:
+            logger.info("Training one model on all tickers")
         
         multi_stock_model, ticker_data = train_multi_stock_model(
             evaluation_tickers, 
             start_date, 
             end_date,
-            model_save_path=os.path.join(model_dir, "multi_stock_model.keras")
+            model_save_path=os.path.join(model_dir, "multi_stock_model.keras"),
+            verbose=verbose
         )
         
         # Process tickers with the trained model (sequential for this mode since we use the same model object)
@@ -181,24 +216,27 @@ def main():
                 output_dir=predictions_dir,
                 train_model=False,
                 portfolio=portfolio,
-                create_plots=True  # Enable plots for this mode
+                create_plots=True,  # Enable plots for this mode
+                verbose=verbose
             )
             results.append(result)
             
     elif mode == 3:
-        print("Using existing model for predictions")
+        if verbose:
+            logger.info("Using existing model for predictions")
         model_path = os.path.join(model_dir, "multi_stock_model.keras")
         
         # Parallel processing for predictions
         max_workers = min(6, len(evaluation_tickers))
-        print(f"Processing {len(evaluation_tickers)} tickers in parallel with {max_workers} workers")
+        if verbose:
+            logger.info(f"Processing {len(evaluation_tickers)} tickers in parallel with {max_workers} workers")
         
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_ticker = {
                 executor.submit(
                     process_single_ticker, 
-                    ticker, start_date, end_date, model_path, predictions_dir, False
+                    ticker, start_date, end_date, model_path, predictions_dir, False, verbose
                 ): ticker 
                 for ticker in evaluation_tickers
             }
@@ -212,10 +250,10 @@ def main():
                     
                     # Update portfolio manually
                     if result['success']:
-                        update_portfolio_with_result(portfolio, result, ticker)
+                        update_portfolio_with_result(portfolio, result, ticker, verbose)
                     
                 except Exception as e:
-                    print(f"Error processing {ticker}: {e}")
+                    logger.error(f"Error processing {ticker}: {e}")
                     results.append({
                         "ticker": ticker,
                         "success": False,
@@ -223,7 +261,9 @@ def main():
                     })
         
         # Create visualization plots separately after processing
-        print("Creating performance visualizations...")
+        if verbose:
+            logger.info("Creating performance visualizations...")
+        
         for ticker in evaluation_tickers:
             ticker_output_dir = os.path.join(predictions_dir, ticker)
             os.makedirs(ticker_output_dir, exist_ok=True)
@@ -234,15 +274,17 @@ def main():
                 try:
                     # Load data for visualization
                     data, _ = prepare_data(ticker, start_date, end_date, lightweight_mode=True)
-                    if data is not None:
+                    if data is not None and verbose:
                         # Create performance visualization from data
-                        print(f"Creating visualization for {ticker}")
+                        logger.info(f"Creating visualization for {ticker}")
                         # Visualization code would go here
                 except Exception as e:
-                    print(f"Error creating visualization for {ticker}: {e}")
+                    if verbose:
+                        logger.error(f"Error creating visualization for {ticker}: {e}")
     
     elif mode == 4:
-        print("Running feature importance analysis")
+        if verbose:
+            logger.info("Running feature importance analysis")
         
         feature_analysis_results = {}
         
@@ -283,21 +325,24 @@ def main():
                         feature_analysis_results[ticker] = importance
                         
                         # Print top features
-                        top_features = importance['combined']['sorted_names'][:10]
-                        print(f"Top 10 features for {ticker}:")
-                        for i, feature in enumerate(top_features):
-                            score = importance['combined']['sorted_scores'][i]
-                            print(f"  {i+1}. {feature}: {score:.4f}")
+                        if verbose:
+                            top_features = importance['combined']['sorted_names'][:10]
+                            logger.info(f"Top 10 features for {ticker}:")
+                            for i, feature in enumerate(top_features):
+                                score = importance['combined']['sorted_scores'][i]
+                                logger.info(f"  {i+1}. {feature}: {score:.4f}")
                     else:
-                        print(f"Skipping {ticker}: {message}")
+                        if verbose:
+                            logger.warning(f"Skipping {ticker}: {message}")
                 except Exception as e:
-                    print(f"Error in feature analysis: {e}")
+                    logger.error(f"Error in feature analysis: {e}")
         
         if feature_analysis_results:
             create_feature_importance_summary(feature_analysis_results, feature_analysis_dir)
-            print(f"Feature importance analysis complete. Results saved to {feature_analysis_dir}")
+            if verbose:
+                logger.info(f"Feature importance analysis complete. Results saved to {feature_analysis_dir}")
         else:
-            print("No feature analysis results were generated.")
+            logger.warning("No feature analysis results were generated.")
         
         return None, None
     
@@ -307,7 +352,7 @@ def main():
     # Save results
     results_df = pd.DataFrame(results)
     results_df.to_csv(os.path.join(base_dir, "stock_results.csv"), index=False)
-    print(f"Processed {len(results)} tickers, results saved to {os.path.join(base_dir, 'stock_results.csv')}")
+    logger.info(f"Processed {len(results)} tickers, results saved to {os.path.join(base_dir, 'stock_results.csv')}")
     
     if len(results_df) > 0 and 'success' in results_df.columns and any(results_df['success']):
         create_strategy_comparison(results_df, base_dir)
@@ -315,9 +360,10 @@ def main():
     # Print execution time
     end_time = time.time()
     execution_time = end_time - start_time
-    print(f"Total execution time: {execution_time:.2f} seconds ({execution_time/60:.2f} minutes)")
+    logger.info(f"Total execution time: {execution_time:.2f} seconds ({execution_time/60:.2f} minutes)")
     
     return results, portfolio
 
 if __name__ == "__main__":
-    results, portfolio = main()
+    # Set verbose to False to reduce output
+    results, portfolio = main(verbose=False)

@@ -27,6 +27,16 @@ def calculate_portfolio_performance(portfolio, output_dir):
     
     # Get final values for all positions in the portfolio
     ticker_returns = []
+    
+    # Track overall trading statistics
+    total_trades = 0
+    winning_trades = 0
+    losing_trades = 0
+    breakeven_trades = 0
+    total_win_amount = 0
+    total_loss_amount = 0
+    
+    # Process each ticker
     for ticker, data in portfolio['returns'].items():
         ticker_return = data['total_return_pct']
         
@@ -40,6 +50,58 @@ def calculate_portfolio_performance(portfolio, output_dir):
             'outperformance': ticker_return - data.get('buy_hold_return_pct', 0)
         }
         
+        # Extract detailed trade information if available
+        if 'trades' in data and isinstance(data['trades'], list):
+            trades_list = data['trades']
+            
+            # Process trades for this ticker
+            ticker_winning_trades = 0
+            ticker_losing_trades = 0
+            ticker_breakeven_trades = 0
+            ticker_win_amount = 0
+            ticker_loss_amount = 0
+            
+            # Track buy/sell pairs
+            buy_price = None
+            
+            for trade in trades_list:
+                action = trade[0]
+                price = trade[2]
+                
+                if action == 'buy':
+                    buy_price = price
+                elif action == 'sell' and buy_price is not None:
+                    # Calculate profit/loss for this trade
+                    trade_pl = price - buy_price
+                    trade_pl_pct = (price / buy_price - 1) * 100
+                    
+                    if trade_pl > 0:
+                        ticker_winning_trades += 1
+                        ticker_win_amount += trade_pl_pct
+                    elif trade_pl < 0:
+                        ticker_losing_trades += 1
+                        ticker_loss_amount += abs(trade_pl_pct)
+                    else:
+                        ticker_breakeven_trades += 1
+                    
+                    buy_price = None  # Reset for next trade pair
+            
+            # Add trade statistics to ticker data
+            ticker_data['winning_trades'] = ticker_winning_trades
+            ticker_data['losing_trades'] = ticker_losing_trades
+            ticker_data['breakeven_trades'] = ticker_breakeven_trades
+            ticker_data['win_rate'] = ticker_winning_trades / max(1, ticker_winning_trades + ticker_losing_trades) * 100
+            ticker_data['avg_win_pct'] = ticker_win_amount / max(1, ticker_winning_trades)
+            ticker_data['avg_loss_pct'] = ticker_loss_amount / max(1, ticker_losing_trades)
+            
+            # Update overall statistics
+            winning_trades += ticker_winning_trades
+            losing_trades += ticker_losing_trades
+            breakeven_trades += ticker_breakeven_trades
+            total_win_amount += ticker_win_amount
+            total_loss_amount += ticker_loss_amount
+            total_trades += data['total_trades']
+        
         # Add strategy if available
         if 'strategy' in data:
             ticker_data['strategy'] = data['strategy']
@@ -50,9 +112,28 @@ def calculate_portfolio_performance(portfolio, output_dir):
     total_value = portfolio['available_cash'] + total_positions_value
     total_return_pct = ((total_value / total_initial) - 1) * 100
     
+    # Calculate overall trading statistics
+    win_rate = winning_trades / max(1, winning_trades + losing_trades) * 100
+    avg_win_pct = total_win_amount / max(1, winning_trades)
+    avg_loss_pct = total_loss_amount / max(1, losing_trades)
+    win_loss_ratio = avg_win_pct / max(0.01, avg_loss_pct)  # Avoid division by zero
+    profit_factor = total_win_amount / max(0.01, total_loss_amount)  # Avoid division by zero
+    
     print(f"Initial Capital: ${total_initial:,.2f}")
     print(f"Final Portfolio Value: ${total_value:,.2f}")
     print(f"Total Return: {total_return_pct:.2f}%")
+    
+    # Display trade statistics
+    print(f"\nTrading Statistics:")
+    print(f"Total Trades: {total_trades}")
+    print(f"Winning Trades: {winning_trades} ({win_rate:.2f}%)")
+    print(f"Losing Trades: {losing_trades} ({100 - win_rate:.2f}%)")
+    print(f"Breakeven Trades: {breakeven_trades}")
+    print(f"Win/Loss Ratio: {win_loss_ratio:.2f}")
+    print(f"Average Win: {avg_win_pct:.2f}%")
+    print(f"Average Loss: {avg_loss_pct:.2f}%")
+    print(f"Profit Factor: {profit_factor:.2f}")
+    print(f"Return per Trade: {total_return_pct / max(1, total_trades):.2f}%")
     
     # Sort tickers by return
     ticker_returns.sort(key=lambda x: x['return_pct'], reverse=True)
@@ -66,7 +147,15 @@ def calculate_portfolio_performance(portfolio, output_dir):
         'final_value': [total_value],
         'total_return_pct': [total_return_pct],
         'cash_remaining': [portfolio['available_cash']],
-        'total_stocks': [len(portfolio['returns'])]
+        'total_stocks': [len(portfolio['returns'])],
+        'total_trades': [total_trades],
+        'winning_trades': [winning_trades],
+        'losing_trades': [losing_trades],
+        'win_rate': [win_rate],
+        'avg_win_pct': [avg_win_pct],
+        'avg_loss_pct': [avg_loss_pct],
+        'win_loss_ratio': [win_loss_ratio],
+        'profit_factor': [profit_factor]
     }
     
     # Add strategy counts if strategy column exists
@@ -99,6 +188,28 @@ def calculate_portfolio_performance(portfolio, output_dir):
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "ticker_returns.png"))
     plt.close()
+    
+    # Plot win rate by ticker (for stocks with trades)
+    if 'win_rate' in ticker_df.columns:
+        # Filter tickers with actual trades
+        trading_df = ticker_df[ticker_df['trades'] > 0].copy()
+        if len(trading_df) > 0:
+            plt.figure(figsize=(12, 8))
+            bar_colors = ['green' if r > 50 else 'red' for r in trading_df['win_rate']]
+            
+            plt.bar(trading_df['ticker'], trading_df['win_rate'], color=bar_colors)
+            plt.axhline(y=50, color='black', linestyle='--', alpha=0.5)
+            plt.title('Win Rate by Ticker')
+            plt.xlabel('Ticker')
+            plt.ylabel('Win Rate (%)')
+            plt.xticks(rotation=45)
+            
+            for i, v in enumerate(trading_df['win_rate']):
+                plt.text(i, v + 3, f"{v:.1f}%", ha='center', fontsize=9)
+            
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, "ticker_win_rates.png"))
+            plt.close()
     
     # Plot strategy outperformance
     plt.figure(figsize=(12, 8))
@@ -142,15 +253,6 @@ def calculate_portfolio_performance(portfolio, output_dir):
     plt.savefig(os.path.join(output_dir, "ticker_trades.png"))
     plt.close()
     
-    # Calculate total portfolio efficiency (return per trade)
-    total_trades = ticker_df['trades'].sum()
-    if total_trades > 0:
-        efficiency = total_return_pct / total_trades
-        print(f"Total Trades: {total_trades}")
-        print(f"Return per Trade: {efficiency:.2f}%")
-    else:
-        print("No trades were executed.")
-    
     # Add comparisons with market benchmarks
     print("\nComparison with Buy & Hold Strategy:")
     buy_hold_returns = ticker_df['buy_hold_return'].tolist()
@@ -158,6 +260,12 @@ def calculate_portfolio_performance(portfolio, output_dir):
     avg_buy_hold = sum(buy_hold_returns) / len(buy_hold_returns) if buy_hold_returns else 0
     print(f"Average Buy & Hold Return: {avg_buy_hold:.2f}%")
     print(f"Strategy Outperformance: {total_return_pct - avg_buy_hold:.2f}%")
+    
+    # Buy & Hold detailed stats
+    buy_hold_positive = sum(1 for r in buy_hold_returns if r > 0)
+    buy_hold_negative = sum(1 for r in buy_hold_returns if r <= 0)
+    print(f"Buy & Hold Winners: {buy_hold_positive} ({buy_hold_positive/max(1, len(buy_hold_returns))*100:.2f}%)")
+    print(f"Buy & Hold Losers: {buy_hold_negative} ({buy_hold_negative/max(1, len(buy_hold_returns))*100:.2f}%)")
     
     # Analyze which stocks were better for active trading vs buy & hold
     if 'strategy' in ticker_df.columns and len(ticker_df) > 0:
@@ -168,7 +276,15 @@ def calculate_portfolio_performance(portfolio, output_dir):
         if len(active_df) > 0:
             avg_active_return = active_df['return_pct'].mean()
             avg_active_outperf = active_df['outperformance'].mean()
-            print(f"Active Trading stocks ({len(active_df)}): Avg return {avg_active_return:.2f}%, Avg outperformance {avg_active_outperf:.2f}%")
+            
+            # Calculate active trading win statistics if available
+            if 'win_rate' in active_df.columns:
+                avg_active_win_rate = active_df['win_rate'].mean()
+                avg_active_win_loss_ratio = active_df['avg_win_pct'].mean() / max(0.01, active_df['avg_loss_pct'].mean())
+                print(f"Active Trading stocks ({len(active_df)}): Avg return {avg_active_return:.2f}%, Avg outperformance {avg_active_outperf:.2f}%")
+                print(f"  Win Rate: {avg_active_win_rate:.2f}%, Win/Loss Ratio: {avg_active_win_loss_ratio:.2f}")
+            else:
+                print(f"Active Trading stocks ({len(active_df)}): Avg return {avg_active_return:.2f}%, Avg outperformance {avg_active_outperf:.2f}%")
         
         if len(buyhold_df) > 0:
             avg_buyhold_return = buyhold_df['return_pct'].mean()
@@ -179,6 +295,13 @@ def calculate_portfolio_performance(portfolio, output_dir):
         'total_final': total_value,
         'total_return_pct': total_return_pct,
         'total_trades': total_trades,
+        'winning_trades': winning_trades,
+        'losing_trades': losing_trades,
+        'win_rate': win_rate,
+        'avg_win_pct': avg_win_pct,
+        'avg_loss_pct': avg_loss_pct,
+        'win_loss_ratio': win_loss_ratio,
+        'profit_factor': profit_factor,
         'ticker_performance': ticker_df.to_dict('records')
     }
 

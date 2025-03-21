@@ -7,12 +7,13 @@ This file handles training and predictions with ensemble models.
 import os
 import json
 import numpy as np
+import logging
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from model.builder import build_model
 
-def train_ensemble_models(X_train, X_test, y_train, y_test, model_dir=None, n_models=3):
+def train_ensemble_models(X_train, X_test, y_train, y_test, model_dir=None, n_models=3, verbose=False):
     """
     Train an ensemble of models with different architectures
     
@@ -21,18 +22,23 @@ def train_ensemble_models(X_train, X_test, y_train, y_test, model_dir=None, n_mo
         y_train, y_test: Training and testing target data
         model_dir: Directory to save models
         n_models: Number of models to train for the ensemble
+        verbose: Whether to print detailed information
         
     Returns:
         List of trained models, ensemble predictions, and performance metrics
     """
-    print(f"\nTraining ensemble of {n_models} models with different architectures")
+    logger = logging.getLogger('stock_prediction')
+    
+    if verbose:
+        logger.info(f"\nTraining ensemble of {n_models} models with different architectures")
     
     # Define model types to use in the ensemble
     model_types = ['standard', 'deep', 'bidirectional', 'hybrid', 'attention']
     
     if n_models > len(model_types):
         n_models = len(model_types)
-        print(f"Limiting ensemble to {n_models} models")
+        if verbose:
+            logger.info(f"Limiting ensemble to {n_models} models")
     
     # Train each model and collect predictions
     models = []
@@ -41,7 +47,8 @@ def train_ensemble_models(X_train, X_test, y_train, y_test, model_dir=None, n_mo
     
     for i in range(n_models):
         model_type = model_types[i]
-        print(f"\nTraining model {i+1}/{n_models}: {model_type}")
+        if verbose:
+            logger.info(f"\nTraining model {i+1}/{n_models}: {model_type}")
         
         # Define model path if directory is provided
         model_path = None
@@ -89,11 +96,11 @@ def train_ensemble_models(X_train, X_test, y_train, y_test, model_dir=None, n_mo
             batch_size=32,
             validation_split=0.2,
             callbacks=callbacks,
-            verbose=1
+            verbose=1 if verbose else 0
         )
         
         # Make predictions
-        y_pred_scaled = model.predict(X_test_scaled)
+        y_pred_scaled = model.predict(X_test_scaled, verbose=0)
         y_pred = scaler_y.inverse_transform(y_pred_scaled).flatten()
         
         # Calculate metrics
@@ -112,10 +119,11 @@ def train_ensemble_models(X_train, X_test, y_train, y_test, model_dir=None, n_mo
         })
         
         # Print model performance
-        print(f"Model {i+1} ({model_type}) performance:")
-        print(f"  MAE: ${mae:.2f}")
-        print(f"  RMSE: ${rmse:.2f}")
-        print(f"  MAPE: {mape:.2f}%")
+        if verbose:
+            logger.info(f"Model {i+1} ({model_type}) performance:")
+            logger.info(f"  MAE: ${mae:.2f}")
+            logger.info(f"  RMSE: ${rmse:.2f}")
+            logger.info(f"  MAPE: {mape:.2f}%")
         
         # Save input shape information with the model
         if model_dir:
@@ -132,9 +140,10 @@ def train_ensemble_models(X_train, X_test, y_train, y_test, model_dir=None, n_mo
     weights_sum = sum(weights)
     normalized_weights = [w/weights_sum for w in weights]
     
-    print("\nEnsemble weights based on inverse RMSE:")
-    for i, (w, metrics) in enumerate(zip(normalized_weights, all_metrics)):
-        print(f"  Model {i+1} ({metrics['type']}): {w:.4f}")
+    if verbose:
+        logger.info("\nEnsemble weights based on inverse RMSE:")
+        for i, (w, metrics) in enumerate(zip(normalized_weights, all_metrics)):
+            logger.info(f"  Model {i+1} ({metrics['type']}): {w:.4f}")
     
     # Apply weighted average for ensemble prediction
     weighted_preds = np.zeros_like(all_predictions[0])
@@ -146,10 +155,11 @@ def train_ensemble_models(X_train, X_test, y_train, y_test, model_dir=None, n_mo
     ens_rmse = np.sqrt(mean_squared_error(y_test, weighted_preds))
     ens_mape = np.mean(np.abs((y_test - weighted_preds) / y_test)) * 100
     
-    print("\nEnsemble model performance:")
-    print(f"  MAE: ${ens_mae:.2f}")
-    print(f"  RMSE: ${ens_rmse:.2f}")
-    print(f"  MAPE: {ens_mape:.2f}%")
+    if verbose:
+        logger.info("\nEnsemble model performance:")
+        logger.info(f"  MAE: ${ens_mae:.2f}")
+        logger.info(f"  RMSE: ${ens_rmse:.2f}")
+        logger.info(f"  MAPE: {ens_mape:.2f}%")
     
     # Save ensemble weights if model directory is provided
     if model_dir:
@@ -169,7 +179,7 @@ def train_ensemble_models(X_train, X_test, y_train, y_test, model_dir=None, n_mo
     
     return models, weighted_preds, all_predictions, ens_mae, ens_rmse, ens_mape
 
-def predict_with_ensemble(models, X_test, y_test, model_dir=None):
+def predict_with_ensemble(models, X_test, y_test, model_dir=None, verbose=False):
     """
     Make predictions using an ensemble of models
     
@@ -178,10 +188,13 @@ def predict_with_ensemble(models, X_test, y_test, model_dir=None):
         X_test: Test features
         y_test: Test targets for metrics calculation
         model_dir: Directory where models were saved
+        verbose: Whether to print detailed information
         
     Returns:
         Ensemble predictions and metrics
     """
+    logger = logging.getLogger('stock_prediction')
+    
     # Load ensemble configuration if available
     ensemble_config = None
     expected_feature_dim = None
@@ -193,15 +206,18 @@ def predict_with_ensemble(models, X_test, y_test, model_dir=None):
                 # Check if feature dimensions are stored in config
                 if 'feature_dim' in ensemble_config:
                     expected_feature_dim = ensemble_config['feature_dim']
-                    print(f"Expected feature dimension from model: {expected_feature_dim}")
-                    print(f"Actual feature dimension in data: {X_test.shape[2]}")
+                    if verbose:
+                        logger.debug(f"Expected feature dimension from model: {expected_feature_dim}")
+                        logger.debug(f"Actual feature dimension in data: {X_test.shape[2]}")
         except Exception as e:
-            print(f"Warning: Error loading ensemble config: {e}")
+            if verbose:
+                logger.warning(f"Warning: Error loading ensemble config: {e}")
     
     # Check for feature dimension mismatch
     if expected_feature_dim is not None and expected_feature_dim != X_test.shape[2]:
-        print(f"WARNING: Feature dimension mismatch. Model expects {expected_feature_dim} features, but {X_test.shape[2]} were provided.")
-        print("Attempting to adapt feature dimensions...")
+        if verbose:
+            logger.warning(f"WARNING: Feature dimension mismatch. Model expects {expected_feature_dim} features, but {X_test.shape[2]} were provided.")
+            logger.info("Attempting to adapt feature dimensions...")
         
         # Try to load feature importance data to map features correctly
         feature_importance_path = os.path.join(os.path.dirname(model_dir), "feature_importance.json")
@@ -213,18 +229,22 @@ def predict_with_ensemble(models, X_test, y_test, model_dir=None):
                     
                     # Check if we can use these indices to select the right features
                     if len(important_indices) == expected_feature_dim and max(important_indices) < X_test.shape[2]:
-                        print(f"Using feature importance data to select the correct {expected_feature_dim} features.")
+                        if verbose:
+                            logger.info(f"Using feature importance data to select the correct {expected_feature_dim} features.")
                         X_test = X_test[:, :, important_indices]
                     else:
-                        print("Feature importance data doesn't match expected dimensions.")
+                        if verbose:
+                            logger.warning("Feature importance data doesn't match expected dimensions.")
             except Exception as e:
-                print(f"Error loading feature importance data: {e}")
+                if verbose:
+                    logger.error(f"Error loading feature importance data: {e}")
         
         # If we couldn't fix it with feature importance data, try a simple approach
         if X_test.shape[2] != expected_feature_dim:
             if X_test.shape[2] > expected_feature_dim:
                 # If we have too many features, use the first expected_feature_dim features
-                print(f"Taking the first {expected_feature_dim} features from the {X_test.shape[2]} available.")
+                if verbose:
+                    logger.info(f"Taking the first {expected_feature_dim} features from the {X_test.shape[2]} available.")
                 X_test = X_test[:, :, :expected_feature_dim]
             else:
                 # If we have too few features, we can't proceed
@@ -255,11 +275,13 @@ def predict_with_ensemble(models, X_test, y_test, model_dir=None):
                         if model_feature_dim and model_feature_dim != X_test_scaled.shape[2]:
                             if X_test_scaled.shape[2] > model_feature_dim:
                                 # Take only the first n features needed by this model
-                                print(f"Model {i} requires {model_feature_dim} features. Using first {model_feature_dim} of {X_test_scaled.shape[2]} features.")
+                                if verbose:
+                                    logger.debug(f"Model {i} requires {model_feature_dim} features. Using first {model_feature_dim} of {X_test_scaled.shape[2]} features.")
                                 X_test_model = X_test_scaled[:, :, :model_feature_dim]
                             else:
                                 # Skip this model if we can't provide enough features
-                                print(f"Skipping model {i} which requires {model_feature_dim} features.")
+                                if verbose:
+                                    logger.warning(f"Skipping model {i} which requires {model_feature_dim} features.")
                                 continue
                         else:
                             X_test_model = X_test_scaled
@@ -269,7 +291,7 @@ def predict_with_ensemble(models, X_test, y_test, model_dir=None):
                 X_test_model = X_test_scaled
             
             # Make prediction with this model
-            y_pred_scaled = model.predict(X_test_model)
+            y_pred_scaled = model.predict(X_test_model, verbose=0)
             
             # Create simple standardizer for each model's predictions
             scaler_y = StandardScaler()
@@ -280,7 +302,8 @@ def predict_with_ensemble(models, X_test, y_test, model_dir=None):
             all_predictions.append(y_pred)
             
         except Exception as e:
-            print(f"Error with model {i}: {e}")
+            if verbose:
+                logger.error(f"Error with model {i}: {e}")
             # Skip this model
     
     if not all_predictions:
@@ -297,10 +320,12 @@ def predict_with_ensemble(models, X_test, y_test, model_dir=None):
                 weights = [w / weights_sum for w in weights]
             else:
                 weights = [1/len(all_predictions)] * len(all_predictions)
-        print(f"Using saved ensemble weights: {weights}")
+        if verbose:
+            logger.info(f"Using saved ensemble weights: {weights}")
     else:
         weights = [1/len(all_predictions)] * len(all_predictions)
-        print(f"Using equal weights for ensemble: {weights}")
+        if verbose:
+            logger.info(f"Using equal weights for ensemble: {weights}")
     
     # Apply weighted average
     weighted_preds = np.zeros_like(all_predictions[0])
@@ -312,9 +337,10 @@ def predict_with_ensemble(models, X_test, y_test, model_dir=None):
     rmse = np.sqrt(mean_squared_error(y_test, weighted_preds))
     mape = np.mean(np.abs((y_test - weighted_preds) / y_test)) * 100
     
-    print("\nEnsemble prediction performance:")
-    print(f"  MAE: ${mae:.2f}")
-    print(f"  RMSE: ${rmse:.2f}")
-    print(f"  MAPE: {mape:.2f}%")
+    if verbose:
+        logger.info("\nEnsemble prediction performance:")
+        logger.info(f"  MAE: ${mae:.2f}")
+        logger.info(f"  RMSE: ${rmse:.2f}")
+        logger.info(f"  MAPE: {mape:.2f}%")
     
     return weighted_preds, all_predictions, mae, rmse, mape

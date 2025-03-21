@@ -4,20 +4,26 @@ Stock Price Prediction System - Basic Features
 This file handles the creation of basic price and volume-based features.
 """
 
-def add_basic_features(df):
+import logging
+
+def add_basic_features(df, verbose=False):
     """
     Add basic price and return features to dataframe
     
     Args:
         df: DataFrame with stock data (must contain at least Close column)
+        verbose: Whether to print detailed information
         
     Returns:
         None (modifies DataFrame in-place)
     """
+    logger = logging.getLogger('stock_prediction')
+    
     if 'High' in df.columns and 'Low' in df.columns:
         df['Range'] = df['High'] - df['Low']
     else:
-        print("Skipping Range calculation due to missing columns")
+        if verbose:
+            logger.warning("Skipping Range calculation due to missing columns")
     
     if 'Close' in df.columns:
         # Previous close and daily return
@@ -29,7 +35,8 @@ def add_basic_features(df):
         df['Price_Relative_50d'] = df['Close'] / df['Close'].rolling(window=50).mean()
         df['Price_Relative_200d'] = df['Close'] / df['Close'].rolling(window=200).mean()
     else:
-        print("Skipping PrevClose and Return calculation due to missing Close column")
+        if verbose:
+            logger.warning("Skipping PrevClose and Return calculation due to missing Close column")
     
     if 'Volume' in df.columns:
         # Volume features
@@ -40,7 +47,8 @@ def add_basic_features(df):
         if 'Close' in df.columns:
             df['Price_Volume_Change'] = df['Return'] * df['Volume_Change']
     else:
-        print("Skipping Volume features due to missing Volume column")
+        if verbose:
+            logger.warning("Skipping Volume features due to missing Volume column")
     
     # Add day of week feature (0=Monday, 4=Friday)
     if hasattr(df.index, 'dayofweek'):
