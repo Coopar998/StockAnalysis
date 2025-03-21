@@ -2,14 +2,19 @@
 Stock Price Prediction System - Data Processor
 ---------------------------------------------
 This file handles data preprocessing and sequence creation for model input.
-Optimized for speed with selective feature processing.
+Optimized for speed with selective feature processing and database integration.
 """
 
 import numpy as np
 import pandas as pd
+import logging
 from data.fetcher import download_stock_data
 from data.features.basic_features import add_basic_features
 from data.features.technical_indicators import add_technical_indicators
+from utils.database import StockDatabase
+
+# Initialize database
+db = StockDatabase()
 
 # Define essential features for faster processing
 ESSENTIAL_FEATURES = [
@@ -54,9 +59,9 @@ def optimize_dataframe_memory(df):
                 
     return df
 
-def prepare_data(ticker, start_date, end_date, min_data_points=250, lightweight_mode=False):
+def prepare_data(ticker, start_date, end_date, min_data_points=250, lightweight_mode=False, verbose=False, force_download=False, max_age_days=1):
     """
-    Download and prepare data for stock prediction
+    Download and prepare data for stock prediction, using database when available
     
     Args:
         ticker: Stock ticker symbol
@@ -64,20 +69,54 @@ def prepare_data(ticker, start_date, end_date, min_data_points=250, lightweight_
         end_date: End date for data retrieval (YYYY-MM-DD)
         min_data_points: Minimum number of data points required
         lightweight_mode: If True, use faster processing with fewer indicators
+        verbose: Whether to print detailed information
+        force_download: Whether to force download from API even if data exists in database
+        max_age_days: Maximum age in days before data is considered stale
         
     Returns:
         Tuple of (DataFrame, message) where DataFrame contains processed data
         or None if processing fails, and message contains success/error details
     """
+    logger = logging.getLogger('stock_prediction')
+    
     try:
+        # Check if we need to update data
+        need_update = db.data_needs_update(ticker, max_age_days) if not force_download else True
+        
+        if need_update:
+            if verbose:
+                log_msg = "Downloading fresh data" if force_download else "Data needs update"
+                logger.info(f"{log_msg} for {ticker}")
+        else:
+            if verbose:
+                logger.info(f"Using recent data from database for {ticker}")
+            
+            # Get data from database with indicators included
+            df = db.get_stock_data(ticker, start_date, end_date, include_indicators=True)
+            
+            if df is not None and not df.empty and len(df) >= min_data_points:
+                # Verify all required columns are present
+                if 'Close' in df.columns:
+                    # Create target variable if needed
+                    if 'Target' not in df.columns:
+                        df['Target'] = df['Close'].shift(-1)
+                        df = df.dropna()
+                        
+                    # Optimize memory usage
+                    df = optimize_dataframe_memory(df)
+                    
+                    return df, "Success (from database)"
+        
+        # If we get here, we need to download and process data
         # Download stock data
-        df = download_stock_data(ticker, start_date, end_date)
+        df = download_stock_data(ticker, start_date, end_date, force_download=force_download, max_age_days=max_age_days)
         
         if df is None:
             return None, "No data available"
             
         if len(df) < min_data_points:
-            print(f"Insufficient data for {ticker}. Only {len(df)} data points available, minimum required is {min_data_points}")
+            if verbose:
+                logger.warning(f"Insufficient data for {ticker}. Only {len(df)} data points available, minimum required is {min_data_points}")
             return None, f"Insufficient data: only {len(df)} days available, need {min_data_points}"
         
         # Ensure required columns exist
@@ -85,44 +124,48 @@ def prepare_data(ticker, start_date, end_date, min_data_points=250, lightweight_
         for col in expected_columns:
             if col not in df.columns:
                 if f"Adj {col}" in df.columns:
-                    print(f"Using 'Adj {col}' instead of '{col}'")
+                    # Silently use adjusted column
                     df[col] = df[f"Adj {col}"]
                 elif f"{col}_" in [c[:len(col)+1] for c in df.columns]:
                     matching_cols = [c for c in df.columns if c.startswith(f"{col}_")]
-                    print(f"Using '{matching_cols[0]}' instead of '{col}'")
+                    # Silently use matching column
                     df[col] = df[matching_cols[0]]
                 else:
-                    print(f"Warning: '{col}' column not found!")
+                    if verbose:
+                        logger.warning(f"Warning: '{col}' column not found for {ticker}!")
         
         # Add basic features
-        add_basic_features(df)
+        add_basic_features(df, verbose=verbose)
         
         # Add technical indicators with lightweight mode option
-        add_technical_indicators(df, lightweight_mode)
+        add_technical_indicators(df, lightweight_mode, verbose=verbose)
         
         # Create target variable (next day's price)
         df['Target'] = df['Close'].shift(-1)
         
         # Drop rows with NaN values
         df = df.dropna()
-        print(f"Final shape after cleaning: {df.shape}")
+        if verbose:
+            logger.info(f"Final shape after cleaning for {ticker}: {df.shape}")
         
         # Optimize memory usage
         df = optimize_dataframe_memory(df)
         
         # Check one more time if we have enough data after all processing
         if len(df) < min_data_points:
-            print(f"Insufficient data after all processing: only {len(df)} rows remain, need {min_data_points}")
+            if verbose:
+                logger.warning(f"Insufficient data for {ticker} after all processing: only {len(df)} rows remain, need {min_data_points}")
             return None, f"Insufficient data after processing: only {len(df)} rows remain"
         
         return df, "Success"
     
     except Exception as e:
         error_msg = str(e)
-        print(f"Error processing {ticker}: {error_msg}")
+        if verbose:
+            logger.error(f"Error processing {ticker}: {error_msg}")
         return None, f"Error: {error_msg}"
 
-def create_sequences(data, seq_length=20, essential_only=False):
+def create_sequences(data, seq_length=20, essential_only=False, verbose=False):
     """
     Create sequences for the LSTM model
     
@@ -130,6 +173,7 @@ def create_sequences(data, seq_length=20, essential_only=False):
         data: DataFrame with processed stock data
         seq_length: Number of time steps in each sequence
         essential_only: If True, use only essential features for faster processing
+        verbose: Whether to print detailed information
         
     Returns:
         X: Features array with shape (n_samples, seq_length, n_features)
@@ -138,6 +182,8 @@ def create_sequences(data, seq_length=20, essential_only=False):
         features: List of feature names
         raw_prices: Array of raw Close prices
     """
+    logger = logging.getLogger('stock_prediction')
+    
     # Select only numeric columns
     numeric_cols = data.select_dtypes(include=[np.number]).columns
     
@@ -152,7 +198,8 @@ def create_sequences(data, seq_length=20, essential_only=False):
         # Use all features
         features = [col for col in numeric_cols if col != 'Target']
     
-    print(f"Using {len(features)} features" + (" (essential only)" if essential_only else ""))
+    if verbose:
+        logger.info(f"Using {len(features)} features" + (" (essential only)" if essential_only else ""))
     
     # Use NumPy vectorized operations for faster sequence creation
     values = data[features].values
@@ -175,7 +222,7 @@ def create_sequences(data, seq_length=20, essential_only=False):
     
     return X, y, dates, features, raw_prices
 
-def combine_data_from_tickers(ticker_data_map, seq_length=20, essential_only=True):
+def combine_data_from_tickers(ticker_data_map, seq_length=20, essential_only=True, verbose=False):
     """
     Combine data from multiple tickers for training a single model.
     
@@ -183,10 +230,13 @@ def combine_data_from_tickers(ticker_data_map, seq_length=20, essential_only=Tru
         ticker_data_map: Dictionary mapping ticker symbols to their prepared dataframes
         seq_length: Length of sequences for LSTM
         essential_only: If True, use only essential features for faster processing
+        verbose: Whether to print detailed information
         
     Returns:
         Combined X and y arrays for training, and ticker features information
     """
+    logger = logging.getLogger('stock_prediction')
+    
     all_X = []
     all_y = []
     ticker_features = {}
@@ -196,7 +246,7 @@ def combine_data_from_tickers(ticker_data_map, seq_length=20, essential_only=Tru
             continue
             
         # Create sequences
-        X, y, _, features, _ = create_sequences(data, seq_length, essential_only)
+        X, y, _, features, _ = create_sequences(data, seq_length, essential_only, verbose)
         
         if len(X) > 0:
             # Store 80% for training
@@ -210,7 +260,8 @@ def combine_data_from_tickers(ticker_data_map, seq_length=20, essential_only=Tru
             all_X.append(X_train)
             all_y.append(y_train)
             
-            print(f"Added {len(X_train)} sequences from {ticker}")
+            if verbose:
+                logger.info(f"Added {len(X_train)} sequences from {ticker}")
     
     if not all_X:
         return None, None, None
@@ -219,6 +270,40 @@ def combine_data_from_tickers(ticker_data_map, seq_length=20, essential_only=Tru
     X_combined = np.vstack(all_X)
     y_combined = np.concatenate(all_y)
     
-    print(f"Combined dataset: {X_combined.shape} sequences from {len(ticker_data_map)} tickers")
+    if verbose:
+        logger.info(f"Combined dataset: {X_combined.shape} sequences from {len(ticker_data_map)} tickers")
     
     return X_combined, y_combined, ticker_features
+
+def get_data_freshness_report():
+    """
+    Generate a report on data freshness for all stocks in the database
+    
+    Returns:
+        DataFrame with freshness information
+    """
+    # Get all available tickers
+    tickers = db.get_available_tickers()
+    
+    freshness_data = []
+    for ticker in tickers:
+        last_update = db.get_last_update_date(ticker)
+        start_date, end_date = db.get_data_date_range(ticker)
+        
+        if last_update:
+            days_old = (datetime.now() - last_update).days
+            needs_update = days_old >= 1
+            
+            freshness_data.append({
+                'ticker': ticker,
+                'last_update': last_update,
+                'days_since_update': days_old,
+                'needs_update': needs_update,
+                'start_date': start_date,
+                'end_date': end_date
+            })
+    
+    if freshness_data:
+        return pd.DataFrame(freshness_data)
+    
+    return pd.DataFrame(columns=['ticker', 'last_update', 'days_since_update', 'needs_update', 'start_date', 'end_date'])
