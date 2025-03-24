@@ -1,9 +1,8 @@
 """
 Stock Price Prediction System - Trading Strategy
 ----------------------------------------------
-This file implements an optimized trading strategy with machine learning-based
-stock selection, adaptive position sizing, and improved risk management.
-This version focuses on increasing win rate and profit factor.
+This file implements the main trading strategy orchestration.
+It coordinates the analysis, signal generation, and strategy execution.
 """
 
 import os
@@ -15,18 +14,21 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 import json
 import time
 import logging
-from scipy.signal import argrelextrema
-from sklearn.ensemble import RandomForestClassifier
 from collections import deque
 
 from data.processor import prepare_data, create_sequences
 from model.trainer import train_evaluate_model
 from model.ensemble import predict_with_ensemble
 from utils.visualization import plot_performance
+from utils.config_reader import get_config
+from trading.indicators import calculate_technical_signals
+from trading.analysis import evaluate_trend_quality, evaluate_volatility
+from trading.execution import execute_trading_strategy, execute_buy_hold_strategy
+from trading.selection import is_good_for_active_trading
 
 def process_ticker(ticker, start_date, end_date, model=None, model_path=None, 
-                  output_dir=None, min_data_points=250, train_model=False, 
-                  portfolio=None, create_plots=True, lightweight_mode=True, verbose=False):
+                  output_dir=None, min_data_points=None, train_model=False, 
+                  portfolio=None, create_plots=True, lightweight_mode=None, verbose=False):
     """
     Process a single ticker and return results.
     If model is provided, use it for prediction. Otherwise, train a new model.
@@ -45,8 +47,16 @@ def process_ticker(ticker, start_date, end_date, model=None, model_path=None,
         lightweight_mode: Use lightweight mode for faster data processing
         verbose: Whether to print detailed output
     """
-    # Get logger
+    # Get logger and config
     logger = logging.getLogger('stock_prediction')
+    config = get_config()
+    
+    # Use configured values if not explicitly provided
+    if min_data_points is None:
+        min_data_points = config.get('data_processing', 'min_data_points', default=250)
+        
+    if lightweight_mode is None:
+        lightweight_mode = config.get('data_processing', 'lightweight_mode', default=True)
     
     processing_start_time = time.time()
     if verbose:
@@ -61,7 +71,7 @@ def process_ticker(ticker, start_date, end_date, model=None, model_path=None,
             logger.info(f"Saving results to {ticker_output_dir}")
     
     # Prepare data
-    data, message = prepare_data(ticker, start_date, end_date, min_data_points, lightweight_mode)
+    data, message = prepare_data(ticker, start_date, end_date, min_data_points, lightweight_mode, verbose)
     
     if data is None:
         if verbose:
@@ -75,8 +85,8 @@ def process_ticker(ticker, start_date, end_date, model=None, model_path=None,
         return {"ticker": ticker, "success": False, "message": "Target column missing"}
     
     try:
-        # Create sequences
-        seq_length = 20
+        # Create sequences with configured sequence length
+        seq_length = config.get('data_processing', 'sequence_length', default=20)
         X, y, dates, features, raw_prices = create_sequences(data, seq_length, essential_only=lightweight_mode)
         if verbose:
             logger.info(f"Created {len(X)} sequences with shape {X.shape}")
@@ -110,8 +120,7 @@ def process_ticker(ticker, start_date, end_date, model=None, model_path=None,
             
             model, history, mae, rmse, mape, y_pred_corrected = train_evaluate_model(
                 X_train, X_test, y_train, y_test, feature_names=features,
-                model_path=ticker_model_path, model_type='deep',
-                fast_mode=True  # Use faster training
+                model_path=ticker_model_path, model_type='deep'
             )
         else:
             # Use the provided pre-trained model(s) or load from file
@@ -185,23 +194,21 @@ def process_ticker(ticker, start_date, end_date, model=None, model_path=None,
                         if verbose:
                             logger.warning("No model path provided and no model specified. Using fallback prediction.")
             
-            # Check for feature importance or model metadata to adapt input features
-            # Handle case where model_path is None
-            if is_ensemble and 'ensemble_dir' in locals():
-                model_dir = ensemble_dir
-            elif model_path is not None:
-                model_dir = os.path.dirname(model_path)
-            else:
-                # Provide a default model directory
-                model_dir = os.path.join("stock_prediction_results", "models")
-                os.makedirs(model_dir, exist_ok=True)
-                if verbose:
-                    logger.info(f"No model path provided, using default directory: {model_dir}")
-            
-            # Try to load feature mapping information (with caching to avoid repeated disk I/O)
+            # Try to load feature mapping information
             feature_mapping = None
             try:
-                # First check model directory for feature importance file
+                # Check model directory for feature importance file
+                if is_ensemble and 'ensemble_dir' in locals():
+                    model_dir = ensemble_dir
+                elif model_path is not None:
+                    model_dir = os.path.dirname(model_path)
+                else:
+                    # Provide a default model directory
+                    model_dir = os.path.join("stock_prediction_results", "models")
+                    os.makedirs(model_dir, exist_ok=True)
+                    if verbose:
+                        logger.info(f"No model path provided, using default directory: {model_dir}")
+                
                 feature_importance_path = os.path.join(model_dir, "feature_importance.json")
                 if os.path.exists(feature_importance_path):
                     with open(feature_importance_path, 'r') as f:
@@ -365,317 +372,15 @@ def process_ticker(ticker, start_date, end_date, model=None, model_path=None,
             logger.error(traceback.format_exc())  # Print full traceback for debugging
         return {"ticker": ticker, "success": False, "message": f"Error during model training: {error_msg}"}
 
-def evaluate_trend_quality(prices, window=20):
-    """
-    Evaluate the quality and strength of a price trend
-    
-    Args:
-        prices: Array of price data
-        window: Window size for trend calculation
-        
-    Returns:
-        Dict with trend metrics
-    """
-    if len(prices) < window * 2:
-        return {'trend_strength': 0, 'trend_direction': 0, 'trend_quality': 0}
-        
-    # Calculate moving average
-    ma = np.convolve(prices, np.ones(window)/window, mode='valid')
-    
-    # Calculate slope of MA (trend direction and strength)
-    ma_diff = np.diff(ma)
-    trend_direction = 1 if np.mean(ma_diff[-window:]) > 0 else -1
-    
-    # Trend strength: normalized slope
-    trend_strength = abs(np.mean(ma_diff[-window:]) / np.mean(prices[-window:]))
-    
-    # Trend quality: R-squared of linear fit to recent prices
-    x = np.arange(window)
-    y = prices[-window:]
-    mean_x = np.mean(x)
-    mean_y = np.mean(y)
-    
-    # Calculate correlation coefficient
-    numerator = np.sum((x - mean_x) * (y - mean_y))
-    denominator = np.sqrt(np.sum((x - mean_x)**2) * np.sum((y - mean_y)**2))
-    r = numerator / denominator if denominator != 0 else 0
-    
-    # R-squared
-    r_squared = r**2
-    
-    # Count local extrema to measure choppiness
-    local_maxima = len(argrelextrema(prices[-window*2:], np.greater, order=3)[0])
-    local_minima = len(argrelextrema(prices[-window*2:], np.less, order=3)[0])
-    choppiness = (local_maxima + local_minima) / (window * 2)
-    
-    # Higher quality = higher r-squared and lower choppiness
-    trend_quality = r_squared * (1 - choppiness)
-    
-    return {
-        'trend_strength': float(trend_strength),
-        'trend_direction': int(trend_direction),
-        'trend_quality': float(trend_quality),
-        'r_squared': float(r_squared),
-        'choppiness': float(choppiness)
-    }
-
-def evaluate_volatility(prices, window=20):
-    """
-    Evaluate the volatility characteristics of a stock
-    
-    Args:
-        prices: Array of price data
-        window: Window size for calculation
-        
-    Returns:
-        Dict with volatility metrics
-    """
-    if len(prices) < window:
-        return {'volatility': 0, 'normalized_volatility': 0, 'volatility_regime': 'unknown'}
-        
-    # Calculate returns
-    returns = np.diff(prices) / prices[:-1]
-    
-    # Recent volatility (standard deviation of returns)
-    recent_volatility = np.std(returns[-window:])
-    
-    # Normalized volatility (volatility / average price)
-    normalized_volatility = recent_volatility / np.mean(prices[-window:])
-    
-    # Longer-term volatility
-    long_window = min(window * 3, len(returns))
-    long_volatility = np.std(returns[-long_window:])
-    
-    # Volatility regime
-    if normalized_volatility < 0.01:
-        regime = 'very_low'
-    elif normalized_volatility < 0.02:
-        regime = 'low'
-    elif normalized_volatility < 0.03:
-        regime = 'medium'
-    elif normalized_volatility < 0.04:
-        regime = 'high'
-    else:
-        regime = 'very_high'
-    
-    # Volatility trend (increasing or decreasing)
-    half_window = window // 2
-    if len(returns) >= window + half_window:
-        prev_volatility = np.std(returns[-(window+half_window):-half_window])
-        vol_trend = 'increasing' if recent_volatility > prev_volatility else 'decreasing'
-    else:
-        vol_trend = 'unknown'
-    
-    return {
-        'volatility': float(recent_volatility),
-        'normalized_volatility': float(normalized_volatility),
-        'volatility_regime': regime,
-        'volatility_trend': vol_trend,
-        'long_term_volatility': float(long_volatility)
-    }
-
-def calculate_technical_signals(prices, volumes=None):
-    """
-    Calculate technical indicators and trading signals
-    
-    Args:
-        prices: Array of price data
-        volumes: Array of volume data (optional)
-        
-    Returns:
-        Dict with technical signals
-    """
-    if len(prices) < 50:
-        return {'signals': {}, 'indicators': {}}
-    
-    signals = {}
-    indicators = {}
-    
-    # Calculate moving averages
-    ma20 = np.convolve(prices, np.ones(20)/20, mode='valid')
-    ma50 = np.convolve(prices, np.ones(50)/50, mode='valid')
-    
-    # Pad the beginning to match the original array length
-    ma20 = np.concatenate([np.full(20-1, ma20[0]), ma20])
-    ma50 = np.concatenate([np.full(50-1, ma50[0]), ma50])
-    
-    # Store indicators
-    indicators['ma20'] = ma20
-    indicators['ma50'] = ma50
-    
-    # MA crossover
-    ma_cross = np.zeros(len(prices))
-    ma_cross[1:] = np.sign(ma20[1:] - ma50[1:]) - np.sign(ma20[:-1] - ma50[:-1])
-    signals['ma_cross_buy'] = (ma_cross > 0)
-    signals['ma_cross_sell'] = (ma_cross < 0)
-    
-    # RSI calculation
-    deltas = np.diff(prices)
-    seed = deltas[:14]
-    up = seed[seed >= 0].sum() / 14
-    down = -seed[seed < 0].sum() / 14
-    
-    if down != 0:
-        rs = up / down
-    else:
-        rs = 0
-        
-    rsi = np.zeros_like(prices)
-    rsi[:14] = 100. - 100. / (1. + rs)
-    
-    for i in range(14, len(prices)):
-        delta = deltas[i - 1]
-        if delta > 0:
-            upval = delta
-            downval = 0
-        else:
-            upval = 0
-            downval = -delta
-            
-        up = (up * 13 + upval) / 14
-        down = (down * 13 + downval) / 14
-        
-        if down != 0:
-            rs = up / down
-        else:
-            rs = 0
-            
-        rsi[i] = 100. - 100. / (1. + rs)
-    
-    indicators['rsi'] = rsi
-    signals['rsi_oversold'] = (rsi < 30)
-    signals['rsi_overbought'] = (rsi > 70)
-    
-    # Bollinger Bands (20, 2)
-    rolling_std = np.zeros_like(prices)
-    for i in range(20, len(prices)):
-        rolling_std[i] = np.std(prices[i-20:i])
-    
-    upper_band = ma20 + 2 * rolling_std
-    lower_band = ma20 - 2 * rolling_std
-    
-    indicators['upper_band'] = upper_band
-    indicators['lower_band'] = lower_band
-    
-    # Bollinger Band signals
-    signals['bb_upper_break'] = (prices > upper_band)
-    signals['bb_lower_break'] = (prices < lower_band)
-    
-    # Price and Volume patterns
-    if volumes is not None and len(volumes) == len(prices):
-        # Increasing price with increasing volume (bullish)
-        price_diff = np.zeros_like(prices)
-        price_diff[1:] = prices[1:] - prices[:-1]
-        
-        volume_diff = np.zeros_like(volumes)
-        volume_diff[1:] = volumes[1:] - volumes[:-1]
-        
-        signals['price_volume_bullish'] = (price_diff > 0) & (volume_diff > 0)
-        signals['price_volume_bearish'] = (price_diff < 0) & (volume_diff > 0)
-    
-    # Trend strength signals
-    trend_metrics = evaluate_trend_quality(prices)
-    signals['strong_trend'] = (trend_metrics['trend_quality'] > 0.6)
-    signals['trend_direction'] = 1 if trend_metrics['trend_direction'] > 0 else -1
-    
-    # Combine signals for overall buy/sell recommendation
-    buy_signals = signals['ma_cross_buy'] | signals['bb_lower_break'] | signals['rsi_oversold']
-    sell_signals = signals['ma_cross_sell'] | signals['bb_upper_break'] | signals['rsi_overbought']
-    
-    # Apply trend filter
-    if trend_metrics['trend_direction'] > 0:  # Uptrend
-        buy_signals = buy_signals & ~signals['rsi_overbought']  # Don't buy at overbought in uptrend
-        sell_signals = sell_signals & ~signals['bb_lower_break']  # Don't sell at support in uptrend
-    else:  # Downtrend
-        buy_signals = buy_signals & ~signals['bb_upper_break']  # Don't buy at resistance in downtrend
-        sell_signals = sell_signals & ~signals['rsi_oversold']  # Don't sell at oversold in downtrend
-    
-    signals['buy'] = buy_signals
-    signals['sell'] = sell_signals
-    
-    return {'signals': signals, 'indicators': indicators}
-
-def is_good_for_active_trading(ticker, trend_metrics, volatility_metrics, prediction_accuracy):
-    """
-    Determine if a stock is good for active trading based on its characteristics
-    
-    Args:
-        ticker: Stock ticker symbol
-        trend_metrics: Dict with trend metrics
-        volatility_metrics: Dict with volatility metrics
-        prediction_accuracy: Model prediction accuracy
-        
-    Returns:
-        Boolean indicating if stock is good for active trading and a confidence score
-    """
-    # Start with base score
-    score = 0.0
-    
-    # MODIFIED: Less stringent criteria for active trading
-    
-    # Check sector-specific factors (tech and energy are often better for active trading)
-    tech_tickers = ["AAPL", "MSFT", "GOOGL", "META", "NVDA", "INTC", "AMD", "ADBE", "CRM"]
-    energy_tickers = ["XOM", "CVX", "COP"]
-    finance_tickers = ["JPM", "BAC", "GS", "MS", "V", "MA", "AXP"]
-    
-    if ticker in tech_tickers:
-        score += 0.15  # Increased from 0.1
-    elif ticker in energy_tickers:
-        score += 0.1   # Increased from 0.05
-    elif ticker in finance_tickers:
-        score += 0.05  # Changed from negative to positive
-    
-    # Add points for prediction accuracy (critical factor) - MODIFIED thresholds
-    if prediction_accuracy > 0.59:
-        score += 0.5
-    elif prediction_accuracy > 0.55:
-        score += 0.4
-    elif prediction_accuracy > 0.52:  # Lowered threshold
-        score += 0.3
-    elif prediction_accuracy > 0.5:
-        score += 0.2
-    else:
-        score -= 0.1  # Reduced penalty
-    
-    # Add points for good trend quality - MODIFIED thresholds
-    if trend_metrics['trend_quality'] > 0.7:
-        score += 0.25
-    elif trend_metrics['trend_quality'] > 0.6:
-        score += 0.2
-    elif trend_metrics['trend_quality'] > 0.5:
-        score += 0.15
-    elif trend_metrics['trend_quality'] > 0.4:  # Lowered threshold
-        score += 0.1
-    
-    # Add points for appropriate volatility - MODIFIED to favor more volatility
-    vol_regime = volatility_metrics['volatility_regime']
-    if vol_regime == 'high':
-        score += 0.2  # Increased from 0.15 (favor more volatile stocks)
-    elif vol_regime == 'medium':
-        score += 0.15  # Decreased from 0.2
-    elif vol_regime == 'low':
-        score += 0.05
-    elif vol_regime == 'very_high':
-        score += 0.05  # Changed from negative to slightly positive
-    elif vol_regime == 'very_low':
-        score -= 0.1   # Reduced penalty
-    
-    # Add points for decreasing volatility (more stable conditions)
-    if volatility_metrics['volatility_trend'] == 'decreasing':
-        score += 0.1
-    
-    # Is it good for active trading? Lower threshold than before
-    is_good = score >= 0.45  # Reduced from 0.6
-    
-    return is_good, score
 
 def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, mae, rmse, mape, 
                       output_dir=None, portfolio=None, fast_analysis=True, verbose=False, data=None):
     """
     Analyze model performance and implement a balanced trading strategy.
-    Modified to generate more signals and improve returns.
+    Uses configuration settings for more realistic returns.
     """
     logger = logging.getLogger('stock_prediction')
+    config = get_config()
     
     # Calculate buy & hold return first
     buy_hold_return_pct = ((y_test[-1] / y_test[0]) - 1) * 100
@@ -749,12 +454,12 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
     # Generate signals based on predictions
     y_diff = np.diff(y_pred_corrected.flatten())
     
+    # Get signal thresholds from config
+    buy_threshold = config.get('trading', 'signal_thresholds', 'buy_threshold', default=1.5)
+    sell_threshold = config.get('trading', 'signal_thresholds', 'sell_threshold', default=-1.5)
+    
     # Calculate percentage changes - this is our main signal
     predicted_change_pcts = (y_diff / y_test[:-1]) * 100
-    
-    # MODIFIED: Lower thresholds to generate more signals
-    buy_threshold = 0.7  # Decreased from 1.0%
-    sell_threshold = -0.7  # Decreased from -1.0%
     
     # Pre-allocate signal arrays
     buy_signals = np.zeros(len(y_diff), dtype=bool)
@@ -776,15 +481,13 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
     trend_direction = np.sign(trend_medium[1:] - trend_medium[:-1])
     long_trend = np.sign(trend_long[-1] - trend_long[-ma_short])
     
-    # MODIFIED: Relax confirmation requirements for signal generation
     # Buy signal: Predicted price increase above threshold OR tech signal with positive trend
     buy_signals = pred_buy_signals | (tech_buy_aligned & (trend_direction > 0))
     
     # Sell signal: Predicted price decrease below threshold OR tech signal with negative trend
     sell_signals = pred_sell_signals | (tech_sell_aligned & (trend_direction < 0))
     
-    # MODIFIED: Less restrictive filtering
-    # Only in very weak trends require stronger signals
+    # Filter signals in weak trends
     if trend_metrics['trend_quality'] < 0.4 and trend_metrics['trend_direction'] < 0:
         # More conservative in very weak downtrends
         buy_signals = buy_signals & (predicted_change_pcts > buy_threshold * 1.2)
@@ -799,401 +502,89 @@ def analyze_performance(ticker, y_test, y_pred_corrected, test_dates, history, m
         logger.info(f"  Buy signals: {np.sum(buy_signals)} out of {len(y_diff)} potential signals")
         logger.info(f"  Sell signals: {np.sum(sell_signals)} out of {len(y_diff)} potential signals")
     
-    # MODIFIED: Strategy selection based on comprehensive stock characteristics
-    # More stocks should use active trading
-    use_buy_hold = (buy_hold_return_pct > 45 and recent_accuracy < 0.52) or \
-                  (buy_hold_return_pct > 60 and recent_accuracy < 0.55) or \
-                  (not is_suitable and buy_hold_return_pct > 35) or \
-                  (trend_metrics['trend_quality'] > 0.85 and trend_metrics['trend_direction'] > 0 and buy_hold_return_pct > 40)
+    # Strategy selection criteria from config
+    buy_hold_return_threshold = config.get('trading', 'strategy_selection', 'buy_hold_return_threshold', default=20.0)
+    trend_quality_threshold = config.get('trading', 'strategy_selection', 'trend_quality_threshold', default=0.6)
+    buy_hold_uptrend_threshold = config.get('trading', 'strategy_selection', 'buy_hold_uptrend_threshold', default=15.0)
+    
+    # More conservative strategy selection criteria
+    use_buy_hold = (buy_hold_return_pct > buy_hold_return_threshold and recent_accuracy < 0.6) or \
+                  (not is_suitable) or \
+                  (trend_metrics['trend_quality'] > trend_quality_threshold and 
+                   trend_metrics['trend_direction'] > 0 and 
+                   buy_hold_return_pct > buy_hold_uptrend_threshold) or \
+                  (recent_accuracy < 0.53)  # Default to buy-hold unless we have strong prediction accuracy
     
     # Default to active trading for suitable stocks
     use_active_trading = not use_buy_hold
     
-    strategy_used = ""
+    # Build the list of signals for execution
+    signals = []
+    for i in range(1, len(y_pred_corrected)):
+        if i-1 < len(y_diff):  # Ensure index is valid
+            if buy_signals[i-1]:
+                signals.append(('buy', test_dates[i], y_test[i]))
+            elif sell_signals[i-1]:
+                signals.append(('sell', test_dates[i], y_test[i]))
     
+    # Execute the appropriate strategy
     if use_buy_hold:
         strategy_used = "buy_hold"
         if verbose:
             logger.info(f"Using buy & hold for {ticker} ({buy_hold_return_pct:.2f}%, accuracy: {recent_accuracy:.2f})")
-        position = 10000 / y_test[0]
-        final_value = position * y_test[-1]
-        trades = [('buy', test_dates[0], y_test[0]), ('sell', test_dates[-1], y_test[-1])]
-        # For buy and hold, we have one winning trade if return is positive
-        winning_trades = 1 if buy_hold_return_pct > 0 else 0
-        losing_trades = 1 if buy_hold_return_pct <= 0 else 0
-    else:  # use_active_trading
+            
+        # Execute buy & hold strategy
+        initial_capital = 10000  # Fixed initial capital
+        result = execute_buy_hold_strategy(ticker, test_dates, y_test, initial_capital)
+        
+    else:  # Use active trading
         strategy_used = "active_trading"
         if verbose:
             logger.info(f"Using active trading for {ticker} with {recent_accuracy:.2f} accuracy")
-        
-        # Implement trading strategy
-        initial_capital = 10000
-        capital = initial_capital
-        position = 0
-        trades = []
-        
-        # Stats for tracking trade performance
-        winning_trades = 0
-        losing_trades = 0
-        breakeven_trades = 0
-        total_win_pct = 0
-        total_loss_pct = 0
-        longest_win_streak = 0
-        longest_lose_streak = 0
-        current_win_streak = 0
-        current_lose_streak = 0
-        entry_price = None
-        
-        # MODIFIED: Dynamic position sizing based on confidence and winning streaks
-        base_position_pct = 1.0  # Base position size (100%)
-        max_position_pct = 1.8   # Maximum position size (increased from 1.5)
-        min_position_pct = 0.6   # Minimum position size (increased from 0.5)
-        
-        # MODIFIED: Adaptive risk management parameters - less conservative
-        # Adjust stop loss for volatility
-        vol_factor = 1.0
-        if volatility_metrics['volatility_regime'] == 'high':
-            vol_factor = 0.85  # Less tight stops for high volatility
-        elif volatility_metrics['volatility_regime'] == 'low':
-            vol_factor = 1.3  # Wider stops for low volatility
-        
-        # Base risk management parameters - MODIFIED for less conservative approach
-        stop_loss_pct = 3.0 * vol_factor      # Increased from 2.5%
-        trailing_stop_pct = 4.0 * vol_factor  # Increased from 3.5%
-        take_profit_pct = 6.0                 # Increased from 5.0%
-        
-        # Track highest price since entry for trailing stop
-        highest_since_entry = None
-        
-        # MODIFIED: Hold periods based on regime
-        min_holding_period = 1
-        max_holding_period = 12  # Reduced from 15 for more active management
-        last_trade_day = None
-        days_in_position = 0
-        
-        # For trading rules
-        rsi_values = tech_signals['indicators'].get('rsi', np.zeros(len(y_test)))
-        
-        # Recent trade outcomes for adaptive strategy
-        recent_trades = deque(maxlen=5)  # Store recent trade results
-        
-        # Build the list of signals
-        signals = []
-        for i in range(1, len(y_pred_corrected)):
-            if i-1 < len(y_diff):  # Ensure index is valid
-                if buy_signals[i-1]:
-                    signals.append(('buy', test_dates[i], y_test[i]))
-                elif sell_signals[i-1]:
-                    signals.append(('sell', test_dates[i], y_test[i]))
-        
-        # Execute the trading strategy with signals
-        for i in range(len(y_test)):
-            current_date = test_dates[i] if i < len(test_dates) else None
-            current_price = y_test[i]
             
-            # If we're in a position, update days counter and check for exits
-            if position > 0:
-                days_in_position += 1
-                
-                # Update highest price since entry for trailing stop
-                if highest_since_entry is None or current_price > highest_since_entry:
-                    highest_since_entry = current_price
-                
-                # Check stop loss
-                if entry_price is not None:
-                    price_change_pct = ((current_price / entry_price) - 1) * 100
-                    
-                    # MODIFIED: Adaptive stops based on recent performance
-                    current_stop_loss = stop_loss_pct
-                    if len(recent_trades) >= 3:
-                        # Count recent losses
-                        recent_losses = sum(1 for trade in recent_trades if trade < 0)
-                        if recent_losses >= 2:
-                            # Tighten stops after multiple losses (but less aggressively)
-                            current_stop_loss = stop_loss_pct * 0.85  # Changed from 0.8
-                    
-                    # Fixed stop loss
-                    if price_change_pct < -current_stop_loss:
-                        if verbose:
-                            logger.info(f"Stop loss triggered at {current_price:.2f} (entry: {entry_price:.2f})")
-                        capital = position * current_price
-                        trades.append(('sell', current_date, current_price))
-                        
-                        # Update statistics
-                        losing_trades += 1
-                        total_loss_pct += abs(price_change_pct)
-                        current_lose_streak += 1
-                        current_win_streak = 0
-                        longest_lose_streak = max(longest_lose_streak, current_lose_streak)
-                        
-                        # Track recent trade outcome
-                        recent_trades.append(price_change_pct)
-                        
-                        # Reset position
-                        position = 0
-                        entry_price = None
-                        highest_since_entry = None
-                        days_in_position = 0
-                        last_trade_day = current_date
-                        continue
-                    
-                    # MODIFIED: Adaptive trailing stop
-                    current_trailing_stop = trailing_stop_pct
-                    if price_change_pct > 4.0:  # Increased from 3.0
-                        # Tighten trailing stop when in good profit
-                        current_trailing_stop = trailing_stop_pct * 0.75  # Modified from 0.7
-                    
-                    # Trailing stop
-                    if highest_since_entry is not None:
-                        drawdown_pct = ((current_price / highest_since_entry) - 1) * 100
-                        if price_change_pct > 2.5 and drawdown_pct < -current_trailing_stop:  # Modified from 2.0
-                            if verbose:
-                                logger.info(f"Trailing stop triggered at {current_price:.2f} (high: {highest_since_entry:.2f})")
-                            capital = position * current_price
-                            trades.append(('sell', current_date, current_price))
-                            
-                            # Determine if this is a win or loss overall
-                            if price_change_pct > 0:
-                                winning_trades += 1
-                                total_win_pct += price_change_pct
-                                current_win_streak += 1
-                                current_lose_streak = 0
-                                longest_win_streak = max(longest_win_streak, current_win_streak)
-                            else:
-                                losing_trades += 1
-                                total_loss_pct += abs(price_change_pct)
-                                current_lose_streak += 1
-                                current_win_streak = 0
-                                longest_lose_streak = max(longest_lose_streak, current_lose_streak)
-                            
-                            # Track recent trade outcome
-                            recent_trades.append(price_change_pct)
-                            
-                            # Reset position
-                            position = 0
-                            entry_price = None
-                            highest_since_entry = None
-                            days_in_position = 0
-                            last_trade_day = current_date
-                            continue
-                    
-                    # MODIFIED: Adaptive take profit based on trend strength
-                    current_take_profit = take_profit_pct
-                    if trend_metrics['trend_quality'] > 0.65 and trend_metrics['trend_direction'] > 0:
-                        # Higher targets in strong uptrends
-                        current_take_profit = take_profit_pct * 1.4  # Increased from 1.3
-                    
-                    # Take profit
-                    if price_change_pct > current_take_profit:
-                        if verbose:
-                            logger.info(f"Take profit triggered at {current_price:.2f} (entry: {entry_price:.2f})")
-                        capital = position * current_price
-                        trades.append(('sell', current_date, current_price))
-                        
-                        # Update statistics
-                        winning_trades += 1
-                        total_win_pct += price_change_pct
-                        current_win_streak += 1
-                        current_lose_streak = 0
-                        longest_win_streak = max(longest_win_streak, current_win_streak)
-                        
-                        # Track recent trade outcome
-                        recent_trades.append(price_change_pct)
-                        
-                        # Reset position
-                        position = 0
-                        entry_price = None
-                        highest_since_entry = None
-                        days_in_position = 0
-                        last_trade_day = current_date
-                        continue
-                    
-                    # MODIFIED: Adaptive time-based exit
-                    # Exit sooner in deteriorating conditions
-                    current_max_holding = max_holding_period
-                    if i < len(rsi_values) and rsi_values[i] > 75:  # Increased from 70
-                        # Exit sooner in overbought conditions
-                        current_max_holding = int(max_holding_period * 0.65)  # Changed from 0.7
-                    
-                    # Time-based exit (max holding period) - MODIFIED to be more flexible
-                    if days_in_position >= current_max_holding and price_change_pct < 3.0:  # Increased from 2.0
-                        if verbose:
-                            logger.info(f"Time-based exit triggered after {days_in_position} days at {current_price:.2f}")
-                        capital = position * current_price
-                        trades.append(('sell', current_date, current_price))
-                        
-                        # Determine if this is a win or loss
-                        if price_change_pct > 0:
-                            winning_trades += 1
-                            total_win_pct += price_change_pct
-                            current_win_streak += 1
-                            current_lose_streak = 0
-                            longest_win_streak = max(longest_win_streak, current_win_streak)
-                        else:
-                            losing_trades += 1
-                            total_loss_pct += abs(price_change_pct)
-                            current_lose_streak += 1
-                            current_win_streak = 0
-                            longest_lose_streak = max(longest_lose_streak, current_lose_streak)
-                        
-                        # Track recent trade outcome
-                        recent_trades.append(price_change_pct)
-                        
-                        # Reset position
-                        position = 0
-                        entry_price = None
-                        highest_since_entry = None
-                        days_in_position = 0
-                        last_trade_day = current_date
-                        continue
-            
-            # Check if this date has a signal
-            signal_match = None
-            for signal in signals:
-                if signal[1] == current_date:
-                    signal_match = signal
-                    break
-            
-            if signal_match:
-                action, date, signal_price = signal_match
-                
-                # Skip if we haven't waited long enough since the last trade
-                if last_trade_day is not None and hasattr(date, 'toordinal') and hasattr(last_trade_day, 'toordinal'):
-                    days_since_last_trade = (date.toordinal() - last_trade_day.toordinal())
-                    if days_since_last_trade < min_holding_period:
-                        continue
-                
-                # MODIFIED: Buy signal with enhanced entry conditions and position sizing
-                if action == 'buy' and position == 0 and capital > 0:
-                    # MODIFIED: Check additional entry conditions - less restrictive
-                    proceed_with_buy = True
-                    
-                    # Check RSI for extreme conditions
-                    if i < len(rsi_values) and rsi_values[i] > 80:  # Increased from 75
-                        proceed_with_buy = False  # Don't buy in extreme overbought conditions
-                    
-                    # Check recent performance - MODIFIED to be less restrictive
-                    if current_lose_streak >= 4:  # Increased from 3
-                        # After 4 consecutive losses, be more selective
-                        if trend_metrics['trend_quality'] < 0.5 or recent_accuracy < 0.52:  # Relaxed from 0.6/0.55
-                            proceed_with_buy = False
-                    
-                    if proceed_with_buy:
-                        # Calculate position size based on comprehensive factors
-                        position_modifier = 1.0
-                        
-                        # Adjust for recent performance
-                        if len(recent_trades) > 0:
-                            recent_win_rate = sum(1 for trade in recent_trades if trade > 0) / len(recent_trades)
-                            if recent_win_rate > 0.6:
-                                position_modifier *= 1.25  # Increased from 1.2
-                            elif recent_win_rate < 0.4:
-                                position_modifier *= 0.85  # Increased from 0.8
-                        
-                        # Adjust for trend strength
-                        if trend_metrics['trend_quality'] > 0.65:  # Reduced from 0.7
-                            position_modifier *= 1.15  # Increased from 1.1
-                        
-                        # Adjust for win/loss streak
-                        if current_win_streak >= 2:
-                            position_modifier *= 1.15  # Increased from 1.1
-                        elif current_lose_streak >= 2:
-                            position_modifier *= 0.75  # Increased from 0.7
-                        
-                        # Adjust for prediction accuracy
-                        if recent_accuracy > 0.54:  # Reduced from 0.55
-                            position_modifier *= 1.15  # Increased from 1.1
-                        
-                        # Cap position size
-                        final_position_pct = min(max(min_position_pct, position_modifier), max_position_pct)
-                        
-                        # Calculate shares to buy
-                        position = (capital * final_position_pct) / current_price
-                        capital -= position * current_price  # Remaining capital
-                        
-                        trades.append(('buy', date, current_price))
-                        entry_price = current_price
-                        highest_since_entry = current_price  # Initialize highest price
-                        days_in_position = 0
-                        last_trade_day = date
-                        
-                # Sell signal and in position
-                elif action == 'sell' and position > 0:
-                    # Calculate return on this trade
-                    trade_return_pct = ((current_price / entry_price) - 1) * 100
-                    
-                    # Execute sell
-                    trade_value = position * current_price
-                    capital += trade_value
-                    
-                    # Update trade statistics
-                    if trade_return_pct > 0:
-                        winning_trades += 1
-                        total_win_pct += trade_return_pct
-                        current_win_streak += 1
-                        current_lose_streak = 0
-                        longest_win_streak = max(longest_win_streak, current_win_streak)
-                    elif trade_return_pct < 0:
-                        losing_trades += 1
-                        total_loss_pct += abs(trade_return_pct)
-                        current_lose_streak += 1
-                        current_win_streak = 0
-                        longest_lose_streak = max(longest_lose_streak, current_lose_streak)
-                    else:
-                        breakeven_trades += 1
-                        current_win_streak = 0
-                        current_lose_streak = 0
-                    
-                    # Track recent trade outcome
-                    recent_trades.append(trade_return_pct)
-                    
-                    position = 0
-                    trades.append(('sell', date, current_price))
-                    last_trade_day = date
-                    entry_price = None
-                    highest_since_entry = None
-                    days_in_position = 0
-        
-        # Close any open position at the end of the testing period
-        if position > 0:
-            final_price = y_test[-1]
-            
-            # Calculate final trade profit/loss if we still have open position
-            if entry_price is not None:
-                trade_return_pct = ((final_price / entry_price) - 1) * 100
-                
-                # Update trade statistics
-                if trade_return_pct > 0:
-                    winning_trades += 1
-                    total_win_pct += trade_return_pct
-                elif trade_return_pct < 0:
-                    losing_trades += 1
-                    total_loss_pct += abs(trade_return_pct)
-                else:
-                    breakeven_trades += 1
-            
-            capital += position * final_price
-            trades.append(('sell', test_dates[-1], final_price))
-            position = 0
-        
-        final_value = capital
+        # Execute active trading strategy with signals
+        initial_capital = 10000  # Fixed initial capital
+        result = execute_trading_strategy(
+            ticker, signals, test_dates, y_test, initial_capital,
+            tech_signals['indicators'].get('rsi', np.zeros(len(y_test))),
+            trend_metrics, verbose
+        )
     
     # Plot results if requested
     if output_dir:
         plot_performance(ticker, history, y_test, y_pred_corrected, test_dates, 
                        buy_signals, sell_signals, trend_medium, output_dir)
     
-    # Calculate performance metrics
-    initial_capital = 10000
-    total_return = ((final_value/initial_capital)-1)*100
+    # Extract results
+    total_return = result['total_return']
+    final_value = result['final_value']
+    trades = result['trades']
+    winning_trades = result['winning_trades']
+    losing_trades = result['losing_trades']
+    win_rate = result['win_rate']
+    avg_win = result['avg_win']
+    avg_loss = result['avg_loss']
+    win_loss_ratio = result['win_loss_ratio']
+    profit_factor = result['profit_factor']
+    total_trades = result['total_trades']
     
-    # Calculate additional trading metrics
-    total_trades = len(trades) // 2  # Each buy/sell pair is one trade
-    win_rate = winning_trades / max(1, winning_trades + losing_trades) * 100
-    avg_win = total_win_pct / max(1, winning_trades)
-    avg_loss = total_loss_pct / max(1, losing_trades)
-    win_loss_ratio = avg_win / max(0.01, avg_loss)  # Avoid division by zero
-    profit_factor = (total_win_pct / max(0.01, total_loss_pct))  # Total gains / total losses
+    # Apply sanity checks from config
+    max_return_pct = config.get('sanity_checks', 'max_return_pct', default=300)
+    min_trades_for_high_return = config.get('sanity_checks', 'min_trades_for_high_return', default=5)
+    max_return_few_trades = config.get('sanity_checks', 'max_return_few_trades', default=100)
+    
+    # Cap the maximum return if needed
+    if total_return > max_return_pct:
+        logger.warning(f"Capping unrealistic return for {ticker} from {total_return:.2f}% to {max_return_pct}%")
+        total_return = max_return_pct
+        # Recalculate final_value based on capped return
+        final_value = initial_capital * (1 + total_return/100)
+    
+    # Check for suspiciously high returns with few trades
+    if total_return > max_return_few_trades and total_trades < min_trades_for_high_return:
+        logger.warning(f"Suspicious high return with few trades for {ticker}")
+        total_return = min(total_return, max_return_few_trades)
+        final_value = initial_capital * (1 + total_return/100)
     
     if verbose:
         logger.info(f"Initial capital: ${initial_capital:.2f}")

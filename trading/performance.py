@@ -2,6 +2,7 @@
 Stock Price Prediction System - Performance Evaluation
 ---------------------------------------------------
 This file handles portfolio performance tracking and visualization.
+Updated to use configuration settings and fix portfolio valuation discrepancies.
 """
 
 import os
@@ -10,6 +11,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
+from utils.config_reader import get_config
 
 def calculate_portfolio_performance(portfolio, output_dir):
     """
@@ -20,9 +22,10 @@ def calculate_portfolio_performance(portfolio, output_dir):
         output_dir: Directory to save outputs
     """
     print("\n==== PORTFOLIO PERFORMANCE SUMMARY ====")
+    config = get_config()
     
     # Calculate portfolio metrics across all tickers
-    total_initial = portfolio['initial_capital']
+    total_initial = portfolio.get('initial_capital', config.get('portfolio', 'initial_capital', default=1000000))
     total_positions_value = 0
     
     # Get final values for all positions in the portfolio
@@ -37,15 +40,15 @@ def calculate_portfolio_performance(portfolio, output_dir):
     total_loss_amount = 0
     
     # Process each ticker
-    for ticker, data in portfolio['returns'].items():
-        ticker_return = data['total_return_pct']
+    for ticker, data in portfolio.get('returns', {}).items():
+        ticker_return = data.get('total_return_pct', 0)
         
         # Create dictionary for ticker performance data
         ticker_data = {
             'ticker': ticker,
             'return_pct': ticker_return,
-            'final_value': data['final_value'],
-            'trades': data['total_trades'],
+            'final_value': data.get('final_value', 0),
+            'trades': data.get('total_trades', 0),
             'buy_hold_return': data.get('buy_hold_return_pct', 0),
             'outperformance': ticker_return - data.get('buy_hold_return_pct', 0)
         }
@@ -100,16 +103,22 @@ def calculate_portfolio_performance(portfolio, output_dir):
             breakeven_trades += ticker_breakeven_trades
             total_win_amount += ticker_win_amount
             total_loss_amount += ticker_loss_amount
-            total_trades += data['total_trades']
+            total_trades += data.get('total_trades', 0)
         
         # Add strategy if available
         if 'strategy' in data:
             ticker_data['strategy'] = data['strategy']
         
         ticker_returns.append(ticker_data)
-        total_positions_value += data['final_value']
+        total_positions_value += data.get('final_value', 0)
     
-    total_value = portfolio['available_cash'] + total_positions_value
+    # Calculate total portfolio value
+    available_cash = portfolio.get('available_cash', 0)
+    total_value = available_cash + total_positions_value
+    
+    # Update portfolio value in the portfolio dictionary to ensure consistency
+    portfolio['final_value'] = total_value
+    
     total_return_pct = ((total_value / total_initial) - 1) * 100
     
     # Calculate overall trading statistics
@@ -146,8 +155,8 @@ def calculate_portfolio_performance(portfolio, output_dir):
         'initial_capital': [total_initial],
         'final_value': [total_value],
         'total_return_pct': [total_return_pct],
-        'cash_remaining': [portfolio['available_cash']],
-        'total_stocks': [len(portfolio['returns'])],
+        'cash_remaining': [portfolio.get('available_cash', 0)],
+        'total_stocks': [len(portfolio.get('returns', {}))],
         'total_trades': [total_trades],
         'winning_trades': [winning_trades],
         'losing_trades': [losing_trades],
