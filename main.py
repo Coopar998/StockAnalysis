@@ -38,6 +38,23 @@ def setup_logging(verbose=False):
     # Return configured logger
     return logger
 
+# Debug function to help diagnose data processing issues
+def debug_data_processing(ticker, start_date, end_date):
+    """Debug data processing for a single ticker"""
+    print(f"\nDebugging data processing for {ticker}")
+    try:
+        from data.processor import prepare_data
+        data, message = prepare_data(ticker, start_date, end_date, verbose=True)
+        if data is None:
+            print(f"  Error: {message}")
+        else:
+            print(f"  Success! Got {len(data)} data points")
+            print(f"  First date: {data.index[0]}")
+            print(f"  Last date: {data.index[-1]}")
+            print(f"  Columns: {data.columns.tolist()[:5]}...")
+    except Exception as e:
+        print(f"  Exception: {e}")
+
 # Function to process a single ticker (for parallel processing)
 def process_single_ticker(ticker, start_date, end_date, model_path, output_dir, train_model=False, verbose=False):
     """Process a single ticker for parallel execution"""
@@ -165,7 +182,7 @@ def main(verbose=False):
     # 2. Train one model on all tickers and use it for predictions
     # 3. Load existing model and use it for predictions
     # 4. Run feature importance analysis only
-    mode = 3  # Change this to your preferred mode
+    mode = 2  # Change this to your preferred mode
     
     # Initialize portfolio
     initial_capital = config.get('portfolio', 'initial_capital', default=1000000)
@@ -231,20 +248,43 @@ def main(verbose=False):
             verbose=verbose
         )
         
+        # DEBUG: Added to diagnose model training and ticker info
+        print(f"\nModel trained successfully. Processing {len(evaluation_tickers)} tickers with the model...")
+        print(f"Model type: {type(multi_stock_model).__name__}")
+        print(f"Ticker metadata contains: {len(ticker_data.keys() if ticker_data else [])} tickers")
+        
+        # Debug a single ticker
+        debug_data_processing("AAPL", start_date, end_date)
+        
         # Process tickers with the trained model (sequential for this mode since we use the same model object)
         for ticker in evaluation_tickers:
-            result = process_ticker(
-                ticker,
-                start_date,
-                end_date,
-                model=multi_stock_model,
-                output_dir=predictions_dir,
-                train_model=False,
-                portfolio=portfolio,
-                create_plots=True,
-                verbose=verbose
-            )
-            results.append(result)
+            print(f"Processing ticker {ticker}... ", end="", flush=True)
+            try:
+                result = process_ticker(
+                    ticker,
+                    start_date,
+                    end_date,
+                    model=multi_stock_model,  # Pass the actual model object, not a path
+                    output_dir=predictions_dir,
+                    train_model=False,
+                    portfolio=portfolio,
+                    create_plots=True,
+                    verbose=verbose
+                )
+                results.append(result)
+                print("done")
+                
+                # Update portfolio manually
+                if result.get('success', False):
+                    update_portfolio_with_result(portfolio, result, ticker, verbose)
+                    
+            except Exception as e:
+                print(f"ERROR: {str(e)}")
+                results.append({
+                    "ticker": ticker,
+                    "success": False,
+                    "message": f"Error: {str(e)}"
+                })
             
     elif mode == 3:
         if verbose:

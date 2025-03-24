@@ -432,7 +432,7 @@ def optimize_model_hyperparameters(X_train, y_train, X_val, y_val):
     
     return best_model, best_config
 
-def train_multi_stock_model(tickers, start_date, end_date, min_data_points=250, model_save_path=None, use_ensemble=True):
+def train_multi_stock_model(tickers, start_date, end_date, min_data_points=250, model_save_path=None, use_ensemble=True, verbose=False):
     """
     Train a model or ensemble of models on data from multiple stocks
     
@@ -442,6 +442,7 @@ def train_multi_stock_model(tickers, start_date, end_date, min_data_points=250, 
         min_data_points: Minimum required data points per ticker
         model_save_path: Path to save the model
         use_ensemble: Whether to use ensemble of models or single model
+        verbose: Whether to print detailed output
         
     Returns:
         Trained model(s) and ticker metadata
@@ -524,7 +525,8 @@ def train_multi_stock_model(tickers, start_date, end_date, min_data_points=250, 
         models, _, _, _, _, _ = train_ensemble_models(
             X_train, X_val, y_train, y_val, 
             model_dir=ensemble_dir, 
-            n_models=3
+            n_models=3,
+            verbose=verbose  # Pass verbose parameter to ensemble training
         )
         
         # Store ticker metadata for reference
