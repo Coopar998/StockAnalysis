@@ -1,0 +1,48 @@
+{
+  "trading": {
+    "position_sizing": {
+      "base_position_pct": 0.3,
+      "max_position_pct": 0.5,
+      "min_position_pct": 0.1,
+      "comment": "Controls how much capital to allocate per position"
+    },
+    "signal_thresholds": {
+      "buy_threshold": 1.5,
+      "sell_threshold": -1.5,
+      "comment": "Minimum predicted price change (%) to generate signals"
+    },
+    "risk_management": {
+      "stop_loss_pct": 5.0,
+      "trailing_stop_pct": 6.0,
+      "take_profit_pct": 10.0,
+      "max_holding_period": 10,
+      "min_holding_period": 2,
+      "comment": "Risk management parameters for trades"
+    },
+    "strategy_selection": {
+      "use_buy_hold_threshold": 0.55,
+      "buy_hold_return_threshold": 20.0,
+      "trend_quality_threshold": 0.6,
+      "buy_hold_uptrend_threshold": 15.0,
+      "comment": "Criteria for choosing active trading vs buy & hold"
+    }
+  },
+  "data_processing": {
+    "sequence_stride": 5,
+    "sequence_length": 20,
+    "min_data_points": 250,
+    "lightweight_mode": true,
+    "comment": "Controls sequence creation and data preprocessing"
+  },
+  "sanity_checks": {
+    "max_return_pct": 300,
+    "min_trades_for_high_return": 5,
+    "max_return_few_trades": 100,
+    "comment": "Limits to prevent unrealistic returns"
+  },
+  "portfolio": {
+    "initial_capital": 1000000,
+    "max_stocks": 40,
+    "comment": "Portfolio configuration"
+  }
+}

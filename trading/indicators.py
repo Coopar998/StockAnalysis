@@ -36,9 +36,11 @@ def calculate_technical_signals(prices, volumes=None):
     indicators['ma20'] = ma20
     indicators['ma50'] = ma50
     
-    # MA crossover
+    # MA crossover - fixed to use NumPy array operations instead of pandas shift
     ma_cross = np.zeros(len(prices))
-    ma_cross[1:] = np.sign(ma20[1:] - ma50[1:]) - np.sign(ma20[:-1] - ma50[:-1])
+    for i in range(1, len(prices)):
+        ma_cross[i] = np.sign(ma20[i] - ma50[i]) - np.sign(ma20[i-1] - ma50[i-1])
+    
     signals['ma_cross_buy'] = (ma_cross > 0)
     signals['ma_cross_sell'] = (ma_cross < 0)
     
@@ -139,9 +141,20 @@ def calculate_technical_signals(prices, volumes=None):
             for i in range(35, len(macd)):
                 signal_line[i] = (macd[i] - signal_line[i-1]) * mult_9 + signal_line[i-1]
             
-            # MACD crossover signals
-            signals['macd_cross_buy'] = (macd > signal_line) & (macd.shift(1) <= signal_line.shift(1))
-            signals['macd_cross_sell'] = (macd < signal_line) & (macd.shift(1) >= signal_line.shift(1))
+            # MACD crossover signals - fixed to use NumPy array operations instead of pandas shift
+            macd_cross_buy = np.zeros(len(macd), dtype=bool)
+            macd_cross_sell = np.zeros(len(macd), dtype=bool)
+            
+            for i in range(1, len(macd)):
+                # Buy when MACD crosses above signal line
+                if macd[i] > signal_line[i] and macd[i-1] <= signal_line[i-1]:
+                    macd_cross_buy[i] = True
+                # Sell when MACD crosses below signal line
+                if macd[i] < signal_line[i] and macd[i-1] >= signal_line[i-1]:
+                    macd_cross_sell[i] = True
+                    
+            signals['macd_cross_buy'] = macd_cross_buy
+            signals['macd_cross_sell'] = macd_cross_sell
             
             indicators['macd'] = macd
             indicators['macd_signal'] = signal_line
@@ -150,16 +163,16 @@ def calculate_technical_signals(prices, volumes=None):
     from trading.analysis import evaluate_trend_quality
     trend_metrics = evaluate_trend_quality(prices)
     
-    buy_signals = signals['ma_cross_buy'] | signals['bb_lower_break'] | signals['rsi_oversold']
-    sell_signals = signals['ma_cross_sell'] | signals['bb_upper_break'] | signals['rsi_overbought']
+    buy_signals = signals.get('ma_cross_buy', np.zeros(len(prices), dtype=bool)) | signals.get('bb_lower_break', np.zeros(len(prices), dtype=bool)) | signals.get('rsi_oversold', np.zeros(len(prices), dtype=bool))
+    sell_signals = signals.get('ma_cross_sell', np.zeros(len(prices), dtype=bool)) | signals.get('bb_upper_break', np.zeros(len(prices), dtype=bool)) | signals.get('rsi_overbought', np.zeros(len(prices), dtype=bool))
     
     # Apply trend filter
     if trend_metrics['trend_direction'] > 0:  # Uptrend
-        buy_signals = buy_signals & ~signals['rsi_overbought']  # Don't buy at overbought in uptrend
-        sell_signals = sell_signals & ~signals['bb_lower_break']  # Don't sell at support in uptrend
+        buy_signals = buy_signals & ~signals.get('rsi_overbought', np.zeros(len(prices), dtype=bool))  # Don't buy at overbought in uptrend
+        sell_signals = sell_signals & ~signals.get('bb_lower_break', np.zeros(len(prices), dtype=bool))  # Don't sell at support in uptrend
     else:  # Downtrend
-        buy_signals = buy_signals & ~signals['bb_upper_break']  # Don't buy at resistance in downtrend
-        sell_signals = sell_signals & ~signals['rsi_oversold']  # Don't sell at oversold in downtrend
+        buy_signals = buy_signals & ~signals.get('bb_upper_break', np.zeros(len(prices), dtype=bool))  # Don't buy at resistance in downtrend
+        sell_signals = sell_signals & ~signals.get('rsi_oversold', np.zeros(len(prices), dtype=bool))  # Don't sell at oversold in downtrend
     
     signals['buy'] = buy_signals
     signals['sell'] = sell_signals

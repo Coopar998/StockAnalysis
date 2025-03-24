@@ -144,11 +144,11 @@ def calculate_portfolio_performance(portfolio, output_dir):
     print(f"Profit Factor: {profit_factor:.2f}")
     print(f"Return per Trade: {total_return_pct / max(1, total_trades):.2f}%")
     
-    # Sort tickers by return
-    ticker_returns.sort(key=lambda x: x['return_pct'], reverse=True)
-    
     # Create dataframe for ticker performance
     ticker_df = pd.DataFrame(ticker_returns)
+    
+    # Debug: Print column names to help diagnose issues
+    print(f"DEBUG: DataFrame columns: {ticker_df.columns.tolist()}")
     
     # Save portfolio summary to CSV
     summary_data = {
@@ -167,13 +167,36 @@ def calculate_portfolio_performance(portfolio, output_dir):
         'profit_factor': [profit_factor]
     }
     
-    # Add strategy counts if strategy column exists
-    if 'strategy' in ticker_df.columns:
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Add strategy counts if strategy column exists and DataFrame is not empty
+    if not ticker_df.empty and 'strategy' in ticker_df.columns:
         summary_data['active_trading_stocks'] = [len(ticker_df[ticker_df['strategy'] == 'active_trading'])]
         summary_data['buy_hold_stocks'] = [len(ticker_df[ticker_df['strategy'] == 'buy_hold'])]
     
     summary_df = pd.DataFrame(summary_data)
     summary_df.to_csv(os.path.join(output_dir, "portfolio_summary.csv"), index=False)
+    
+    # If no ticker data is available, return early with empty results
+    if ticker_df.empty:
+        print("No ticker data available for visualization. Skipping plots.")
+        
+        # Return reduced result set since we have no ticker data
+        return {
+            'total_initial': total_initial,
+            'total_final': total_value,
+            'total_return_pct': total_return_pct,
+            'total_trades': total_trades,
+            'winning_trades': winning_trades,
+            'losing_trades': losing_trades,
+            'win_rate': win_rate,
+            'avg_win_pct': avg_win_pct,
+            'avg_loss_pct': avg_loss_pct,
+            'win_loss_ratio': win_loss_ratio,
+            'profit_factor': profit_factor,
+            'ticker_performance': []
+        }
     
     # Save ticker performance to CSV
     ticker_df.to_csv(os.path.join(output_dir, "ticker_performance.csv"), index=False)
@@ -316,6 +339,11 @@ def calculate_portfolio_performance(portfolio, output_dir):
 
 def create_strategy_comparison(results_df, output_dir):
     """Create a visualization comparing strategy performance to buy & hold"""
+    # Early return if results_df is empty
+    if results_df.empty or 'total_return' not in results_df.columns or 'buy_hold_return' not in results_df.columns:
+        print("Not enough data for strategy comparison. Skipping visualization.")
+        return
+    
     plt.figure(figsize=(14, 8))
     
     # Calculate outperformance
