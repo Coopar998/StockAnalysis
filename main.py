@@ -4,6 +4,7 @@ Stock Price Prediction System - Main Application
 This file coordinates the overall workflow of the stock prediction system.
 It handles downloading data, training models, generating predictions,
 and analyzing performance for multiple stocks.
+Updated to use configuration settings for more realistic performance.
 """
 
 import os
@@ -23,6 +24,7 @@ from model.trainer import train_multi_stock_model
 from trading.strategy import process_ticker
 from trading.performance import calculate_portfolio_performance, create_strategy_comparison
 from utils.feature_analysis import analyze_feature_importance, create_feature_importance_summary
+from utils.config_reader import get_config
 
 # Configure logging
 def setup_logging(verbose=False):
@@ -40,7 +42,12 @@ def setup_logging(verbose=False):
 def process_single_ticker(ticker, start_date, end_date, model_path, output_dir, train_model=False, verbose=False):
     """Process a single ticker for parallel execution"""
     try:
-        # MODIFIED: Use adaptive lightweight mode - faster for known high-quality data
+        # Get configuration
+        config = get_config()
+        min_data_points = config.get('data_processing', 'min_data_points', default=250)
+        lightweight_mode = config.get('data_processing', 'lightweight_mode', default=True)
+        
+        # Process the ticker
         return process_ticker(
             ticker,
             start_date,
@@ -50,7 +57,8 @@ def process_single_ticker(ticker, start_date, end_date, model_path, output_dir, 
             train_model=train_model,
             portfolio=None,  # Can't share portfolio between processes
             create_plots=True,  # Enable plots for visualization
-            lightweight_mode=True,  # Use lightweight mode for faster processing
+            min_data_points=min_data_points,
+            lightweight_mode=lightweight_mode,
             verbose=verbose
         )
     except Exception as e:
@@ -63,11 +71,16 @@ def process_single_ticker(ticker, start_date, end_date, model_path, output_dir, 
 # Function to update portfolio with results from parallel processing
 def update_portfolio_with_result(portfolio, result, ticker, verbose=False):
     """Update portfolio with results from a processed ticker"""
-    if not result['success']:
+    if not result.get('success', False):
         return
     
+    # Get configuration
+    config = get_config()
+    
     # Create basic performance data for the portfolio
-    initial_capital = 10000
+    initial_capital = config.get('portfolio', 'initial_capital', default=1000000) / config.get('portfolio', 'max_stocks', default=40)
+    
+    # Get results data
     total_return = result.get('total_return', 0)
     buy_hold_return = result.get('buy_hold_return', 0)
     trades = result.get('total_trades', 0)
@@ -104,13 +117,17 @@ def main(verbose=False):
     # Setup logging based on verbosity
     logger = setup_logging(verbose)
     
+    # Get configuration
+    config = get_config()
+    
     # Record start time
     start_time = time.time()
 
-    # MODIFIED: Increase historical data for better model training
+    # Set date range
     end_date = datetime.today().strftime('%Y-%m-%d')
-    start_date = (datetime.today() - timedelta(days=3000)).strftime('%Y-%m-%d')  # Increased from 2500
+    start_date = (datetime.today() - timedelta(days=3000)).strftime('%Y-%m-%d')
     
+    # Setup directories
     base_dir = "stock_prediction_results"
     model_dir = os.path.join(base_dir, "models")
     predictions_dir = os.path.join(base_dir, "predictions")
@@ -120,8 +137,7 @@ def main(verbose=False):
     os.makedirs(predictions_dir, exist_ok=True)
     os.makedirs(feature_analysis_dir, exist_ok=True)
     
-    # INCREASED NUMBER: Use 40 stocks for testing with a mix of different sectors
-    # Define a wider set of evaluation tickers covering different sectors
+    # Define evaluation tickers - use a mix of different sectors
     evaluation_tickers = [
         # Tech
         "AAPL", "MSFT", "GOOGL", "META", "NVDA", "INTC", "AMD", "ADBE", "CRM", "CSCO", "ORCL", 
@@ -135,6 +151,10 @@ def main(verbose=False):
         "XOM", "CVX", "COP", "SLB", "EOG", "PSX", "OXY", "VLO", "MPC"
     ]
     
+    # Limit to max_stocks from config
+    max_stocks = config.get('portfolio', 'max_stocks', default=40)
+    evaluation_tickers = evaluation_tickers[:max_stocks]
+    
     if verbose:
         logger.info(f"Evaluating on {len(evaluation_tickers)} stocks from multiple sectors")
     
@@ -147,13 +167,15 @@ def main(verbose=False):
     # 4. Run feature importance analysis only
     mode = 3  # Change this to your preferred mode
     
+    # Initialize portfolio
+    initial_capital = config.get('portfolio', 'initial_capital', default=1000000)
     portfolio = {
-        'initial_capital': 1000000,  # $1M initial capital
-        'available_cash': 1000000,
-        'positions': {},  # {ticker: {'shares': 100, 'cost_basis': 150.0}}
-        'trade_history': [],  # List of trades executed
-        'daily_values': [],  # Daily portfolio values
-        'returns': {}  # Performance metrics by ticker
+        'initial_capital': initial_capital,
+        'available_cash': initial_capital,
+        'positions': {},
+        'trade_history': [],
+        'daily_values': [],
+        'returns': {}
     }
     
     results = []
@@ -192,7 +214,7 @@ def main(verbose=False):
                     result = future.result()
                     results.append(result)
                     # Update portfolio
-                    if result['success']:
+                    if result.get('success', False):
                         update_portfolio_with_result(portfolio, result, result['ticker'], verbose)
                 except Exception as e:
                     logger.error(f"Error in processing: {e}")
@@ -219,7 +241,7 @@ def main(verbose=False):
                 output_dir=predictions_dir,
                 train_model=False,
                 portfolio=portfolio,
-                create_plots=True,  # Enable plots for this mode
+                create_plots=True,
                 verbose=verbose
             )
             results.append(result)
@@ -230,9 +252,9 @@ def main(verbose=False):
         model_path = os.path.join(model_dir, "multi_stock_model.keras")
         
         # Increase batch size for faster processing with more stocks
-        batch_size = min(len(evaluation_tickers), 10)  # MODIFIED: Increased from 5
+        batch_size = min(len(evaluation_tickers), 10)
         
-        # MODIFIED: Chunk the tickers into batches to avoid memory issues
+        # Chunk the tickers into batches to avoid memory issues
         ticker_chunks = [evaluation_tickers[i:i+batch_size] for i in range(0, len(evaluation_tickers), batch_size)]
         
         for chunk_idx, ticker_chunk in enumerate(ticker_chunks):
@@ -262,7 +284,7 @@ def main(verbose=False):
                         results.append(result)
                         
                         # Update portfolio manually
-                        if result['success']:
+                        if result.get('success', False):
                             update_portfolio_with_result(portfolio, result, ticker, verbose)
                         
                     except Exception as e:
@@ -286,7 +308,7 @@ def main(verbose=False):
             if ticker_result:
                 try:
                     # Load data for visualization
-                    data, _ = prepare_data(ticker, start_date, end_date, lightweight_mode=True)
+                    data, _ = prepare_data(ticker, start_date, end_date)
                     if data is not None and verbose:
                         # Create performance visualization from data
                         logger.info(f"Creating visualization for {ticker}")
@@ -306,11 +328,14 @@ def main(verbose=False):
             # Create a function to analyze a single ticker
             def analyze_ticker_features(ticker):
                 try:
-                    data, message = prepare_data(ticker, start_date, end_date, lightweight_mode=True)
+                    config = get_config()
+                    min_data_points = config.get('data_processing', 'min_data_points', default=250)
+                    
+                    data, message = prepare_data(ticker, start_date, end_date, min_data_points=min_data_points)
                     if data is None:
                         return ticker, None, message
                     
-                    X, y, dates, features, _ = create_sequences(data, essential_only=True)
+                    X, y, dates, features, _ = create_sequences(data)
                     split = int(len(X) * 0.8)
                     X_train, y_train = X[:split], y[:split]
                     
@@ -378,5 +403,5 @@ def main(verbose=False):
     return results, portfolio
 
 if __name__ == "__main__":
-    # Set verbose to False to reduce output
-    results, portfolio = main(verbose=False)
+    # Set verbose to True for detailed output
+    results, portfolio = main(verbose=True)

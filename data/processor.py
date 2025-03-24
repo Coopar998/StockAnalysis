@@ -13,6 +13,7 @@ from datetime import datetime
 from data.features.basic_features import add_basic_features
 from data.features.technical_indicators import add_technical_indicators
 from utils.database import StockDatabase
+from utils.config_reader import get_config
 
 # Initialize database
 db = StockDatabase()
@@ -60,7 +61,7 @@ def optimize_dataframe_memory(df):
                 
     return df
 
-def prepare_data(ticker, start_date, end_date, min_data_points=250, lightweight_mode=False, verbose=False, force_download=False, max_age_days=1):
+def prepare_data(ticker, start_date, end_date, min_data_points=None, lightweight_mode=None, verbose=False, force_download=False, max_age_days=1):
     """
     Download and prepare data for stock prediction, using database when available
     
@@ -79,6 +80,14 @@ def prepare_data(ticker, start_date, end_date, min_data_points=250, lightweight_
         or None if processing fails, and message contains success/error details
     """
     logger = logging.getLogger('stock_prediction')
+    config = get_config()
+    
+    # Use configured values if not explicitly provided
+    if min_data_points is None:
+        min_data_points = config.get('data_processing', 'min_data_points', default=250)
+        
+    if lightweight_mode is None:
+        lightweight_mode = config.get('data_processing', 'lightweight_mode', default=True)
     
     try:
         # Check if we need to update data
@@ -166,9 +175,9 @@ def prepare_data(ticker, start_date, end_date, min_data_points=250, lightweight_
             logger.error(f"Error processing {ticker}: {error_msg}")
         return None, f"Error: {error_msg}"
 
-def create_sequences(data, seq_length=20, essential_only=False, verbose=False):
+def create_sequences(data, seq_length=None, essential_only=False, verbose=False):
     """
-    Create sequences for the LSTM model
+    Create sequences for the LSTM model, with stride to reduce data leakage
     
     Args:
         data: DataFrame with processed stock data
@@ -184,6 +193,14 @@ def create_sequences(data, seq_length=20, essential_only=False, verbose=False):
         raw_prices: Array of raw Close prices
     """
     logger = logging.getLogger('stock_prediction')
+    config = get_config()
+    
+    # Use configured values if not explicitly provided
+    if seq_length is None:
+        seq_length = config.get('data_processing', 'sequence_length', default=20)
+    
+    # Get stride from config (controls overlap between sequences)
+    stride = config.get('data_processing', 'sequence_stride', default=5)
     
     # Select only numeric columns
     numeric_cols = data.select_dtypes(include=[np.number]).columns
@@ -206,24 +223,33 @@ def create_sequences(data, seq_length=20, essential_only=False, verbose=False):
     values = data[features].values
     target = data['Target'].values
     
+    # Use stride to control the overlap between sequences
+    # Stride=1 means every point is used as a sequence start (maximum overlap)
+    # Stride=seq_length means no overlap between sequences
+    # Higher stride values reduce data leakage but also reduce the number of training examples
+    n_samples = max(1, (len(data) - seq_length) // stride)
+    
+    if verbose:
+        logger.info(f"Creating {n_samples} sequences with stride {stride}")
+    
     # Pre-allocate arrays for better performance
-    n_samples = len(data) - seq_length
     X = np.zeros((n_samples, seq_length, len(features)), dtype=np.float32)
     y = np.zeros(n_samples, dtype=np.float32)
     raw_prices = np.zeros(n_samples, dtype=np.float32)
     
-    # Fill arrays using indexing
+    # Fill arrays using indexing and stride
     for i in range(n_samples):
-        X[i] = values[i:i+seq_length]
-        y[i] = target[i+seq_length]
-        raw_prices[i] = data['Close'].iloc[i+seq_length]
+        idx = i * stride  # Use stride to reduce overlap between sequences
+        X[i] = values[idx:idx+seq_length]
+        y[i] = target[idx+seq_length-1]  # Target corresponds to last point in sequence
+        raw_prices[i] = data['Close'].iloc[idx+seq_length-1]
     
     # Get dates for each target
-    dates = data.index[seq_length:].tolist()
+    dates = data.index[np.array([i * stride + seq_length - 1 for i in range(n_samples)])].tolist()
     
     return X, y, dates, features, raw_prices
 
-def combine_data_from_tickers(ticker_data_map, seq_length=20, essential_only=True, verbose=False):
+def combine_data_from_tickers(ticker_data_map, seq_length=None, essential_only=True, verbose=False):
     """
     Combine data from multiple tickers for training a single model.
     
@@ -237,6 +263,11 @@ def combine_data_from_tickers(ticker_data_map, seq_length=20, essential_only=Tru
         Combined X and y arrays for training, and ticker features information
     """
     logger = logging.getLogger('stock_prediction')
+    config = get_config()
+    
+    # Use configured values if not explicitly provided
+    if seq_length is None:
+        seq_length = config.get('data_processing', 'sequence_length', default=20)
     
     all_X = []
     all_y = []
